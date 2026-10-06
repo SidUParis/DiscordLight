@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Build artifacts
+*.app/
+*.o
+*.dSYM/
+build/
+bin/
+DiscordLight
+DiscordLite
+
+# Secrets & Local Configurations
+config.json
+*.env
+*.env.*
+*.token
+*.key
+.config/
+*.log
+
+# Editor & IDEs
+.vscode/
+.idea/
+*.swp
+*~

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DiscordLight</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <!-- Workspace Navigation -->
+      <div class="sidebar-header">
+        <div class="workspace-tabs" id="workspaceTabs">
+          <button class="ws-tab active" data-tab="pinned">常用关注</button>
+          <button class="ws-tab" data-tab="servers">服务器</button>
+          <button class="ws-tab" data-tab="dms">私信群聊</button>
+        </div>
+
+        <div class="server-picker-row" id="serverPickerRow" style="display: none;">
+          <select id="serverSelect" class="server-dropdown">
+            <option value="pinned">常用关注</option>
+            <option value="dms">私信群聊</option>
+          </select>
+        </div>
+
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M21.71 20.29l-5.4-5.4A7.9 7.9 0 0 0 18 10a8 8 0 1 0-8 8 7.9 7.9 0 0 0 4.89-1.69l5.4 5.4a1 1 0 0 0 1.42 0 1 1 0 0 0 0-1.42zM4 10a6 6 0 1 1 6 6 6 6 0 0 1-6-6z"/></svg>
+          <input type="text" id="channelSearch" placeholder="搜索频道或线程..." autocomplete="off">
+          <button id="searchClearBtn" class="search-clear-btn" style="display: none;">✕</button>
+        </div>
+      </div>
+
+      <!-- Channel Tree List -->
+      <div class="channel-list-container" id="channelList">
+        <!-- Channels & Threads dynamically rendered here -->
+      </div>
+
+      <!-- User Profile Card -->
+      <div class="user-footer">
+        <div class="user-avatar-wrap">
+          <div class="user-avatar" id="myAvatar">D</div>
+          <span class="online-badge"></span>
+        </div>
+        <div class="user-info">
+          <div class="user-name" id="myUsername">Connecting...</div>
+          <div class="user-sub">DiscordLight · 原生轻量</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-container">
+      <header class="chat-header">
+        <div class="header-left">
+          <button id="threadBackBtn" class="btn-thread-back" style="display:none;" onclick="returnToParentChannel()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+            <span id="threadBackText">返回频道</span>
+          </button>
+          <span class="channel-hash" id="channelHash">#</span>
+          <div class="channel-title-group">
+            <h2 class="channel-title" id="activeChannelTitle">连接中...</h2>
+            <span class="channel-server" id="activeChannelServer">DiscordLight</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span class="status-indicator" id="statusIndicator">
+            <span class="status-dot"></span>
+            <span class="status-text">连接正常</span>
+          </span>
+          <button id="pinToggleBtn" class="header-btn" title="收藏/取消收藏">☆ 关注</button>
+          <button id="refreshBtn" class="header-btn" title="刷新消息">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <span>刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Message History -->
+      <section class="messages-viewport" id="messagesViewport">
+        <div class="messages-container" id="messagesList">
+          <!-- Messages dynamically rendered here -->
+        </div>
+      </section>
+
+      <!-- Input Bar -->
+      <footer class="input-container">
+        <!-- Autocomplete Mention Popover -->
+        <div class="mention-popover" id="mentionPopover" style="display: none;">
+          <div class="mention-header">可艾特的用户与机器人</div>
+          <div class="mention-items" id="mentionItems">
+            <!-- Autocomplete candidates -->
+          </div>
+        </div>
+
+        <!-- Quick Agent Mention Chips -->
+        <div class="input-agent-chips" id="inputAgentChips">
+          <!-- Dynamically populated with active bots in current channel -->
+        </div>
+
+        <div class="input-box-wrapper">
+          <textarea id="messageInput" rows="1" placeholder="发送指令或消息 (@ 唤起机器人，回车发送，Shift+Enter 换行)..." autocomplete="off"></textarea>
+          <div class="input-actions-row">
+            <span class="input-hint">Enter 发送 · Shift+Enter 换行</span>
+            <button id="sendBtn" class="send-button" title="发送">
+              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Setup / Token Modal -->
+  <div id="tokenModal" class="setup-modal-backdrop" style="display: none;">
+    <div class="setup-modal-card">
+      <div class="setup-modal-icon">
+        <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09-.01-.02-.04-.03-.07-.03-1.5.26-2.93.71-4.27 1.33-.01 0-.02.01-.03.02-2.72 4.07-3.47 8.03-3.1 11.95 0 .02.01.04.03.05 1.8 1.32 3.53 2.12 5.24 2.65.03.01.06 0 .07-.02.4-.55.76-1.13 1.07-1.74.02-.04 0-.08-.04-.09-.57-.22-1.11-.48-1.64-.78-.04-.02-.04-.08-.01-.11.11-.08.22-.17.33-.25.02-.02.05-.02.07-.01 3.44 1.57 7.15 1.57 10.55 0 .02-.01.05-.01.07.01.11.09.22.17.33.26.04.03.04.09-.01.11-.52.31-1.07.56-1.64.78-.04.01-.05.06-.04.09.32.61.68 1.19 1.07 1.74.01.02.04.03.07.02 1.72-.53 3.45-1.33 5.25-2.65.02-.01.03-.03.03-.05.44-4.53-.73-8.46-3.1-11.95-.01-.01-.02-.02-.04-.02zM8.52 14.91c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.84 2.12-1.89 2.12zm6.97 0c-1.03 0-1.89-.95-1.89-2.12s.84-2.12 1.89-2.12c1.06 0 1.9.96 1.89 2.12 0 1.17-.83 2.12-1.89 2.12z"/></svg>
+      </div>
+      <h2>欢迎使用 DiscordLight</h2>
+      <p class="setup-desc">轻量、极速、无 Electron 的原生 macOS Discord 客户端。所有凭据仅安全保存在本地 <code>~/.config/discordlight/config.json</code>，绝不上传第三方服务器。</p>
+      <div class="setup-field">
+        <label for="tokenInput">Discord User Token</label>
+        <input type="password" id="tokenInput" placeholder="粘贴您的 Discord Token (例如: OTk...)" />
+      </div>
+      <div class="setup-actions">
+        <button id="saveTokenBtn" class="btn-setup-save">保存并连接</button>
+      </div>
+      <div class="setup-help">
+        <strong>如何获取 Token？</strong>
+        <span>1. 在 Chrome / Safari 打开 Discord 网页版并登录。<br>2. 按 ⌥+⌘+I 打开开发者工具，切到 Network 标签页。<br>3. 点击任意请求（如 /messages），复制 Request Headers 中的 <code>Authorization</code> 字段内容。</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
