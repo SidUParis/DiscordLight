@@ -2,7 +2,7 @@
 
 面向 AI 开发者与 Agent 工作流的原生超轻量 macOS Discord 客户端。基于 Objective-C Cocoa + WKWebView 构建，**内存占用 < 80 MB，待机 CPU 0%**，彻底告别臃肿的 Electron。
 
-[English](./README.md) | 中文说明
+[English](./README.md) | 中文说明 | [交接文档 (Handover)](./HANDOVER.md)
 
 ---
 

@@ -2,7 +2,7 @@
 
 A native, ultra-lightweight macOS client for Discord tailored for AI developer agent workflows. Built with Objective-C Cocoa and WKWebView — **0% idle CPU, < 80 MB RAM**, and zero Electron bloat.
 
-English | [中文说明](./README_CN.md)
+English | [中文说明](./README_CN.md) | [Handover Doc](./HANDOVER.md)
 
 ---
 
