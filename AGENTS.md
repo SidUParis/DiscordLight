@@ -1,0 +1,27 @@
+# DiscordLight Agent Specification (AGENTS.md)
+
+> **Parent Specification**: Inherits from [`/Users/xu/Developer/AGENTS.md`](../../AGENTS.md) and [`developer-workflow`](../../.agents/skills/developer-workflow/SKILL.md).  
+> **Project Scope**: `/Users/xu/Developer/projects/DiscordLight`  
+> **Project Skill**: [`.agents/skills/discordlight-workflow/SKILL.md`](.agents/skills/discordlight-workflow/SKILL.md)  
+
+---
+
+## 1. Project Identity & Standard Operating Procedures
+
+DiscordLight is a native macOS Discord client tailored for AI developer agent workflows.
+
+- **Layer**: Layer 1 (`projects/` - Production Deliverable) in the Developer Workspace.
+- **Remote Repo**: [https://github.com/SidUParis/DiscordLight](https://github.com/SidUParis/DiscordLight).
+- **Installed App**: `/Applications/DiscordLight.app`.
+- **System Config**: `~/.config/discordlight/config.json`.
+
+---
+
+## 2. Agent Execution Checklist
+
+Before making changes to this project, any AI agent must:
+1. Verify that changes maintain ultra-low resource targets (< 80MB RAM, 0% CPU idle).
+2. Ensure Touch Bar actions preserve `NSPopoverTouchBarItem` architecture to prevent IME keyboard candidate collision.
+3. Keep frontend code in clean, vanilla ES6+ (no heavy npm build steps or frameworks).
+4. Run pre-commit security audits to guarantee zero token or credential leaks.
+5. Rebuild and install using `make build && make install` to verify packaging.
