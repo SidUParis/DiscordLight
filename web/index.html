@@ -14,20 +14,20 @@
       <div class="sidebar-header">
         <div class="workspace-tabs" id="workspaceTabs">
           <button class="ws-tab active" data-tab="pinned">常用关注</button>
+          <button class="ws-tab" data-tab="dms">群聊私信</button>
           <button class="ws-tab" data-tab="servers">服务器</button>
-          <button class="ws-tab" data-tab="dms">私信群聊</button>
         </div>
 
         <div class="server-picker-row" id="serverPickerRow" style="display: none;">
           <select id="serverSelect" class="server-dropdown">
             <option value="pinned">常用关注</option>
-            <option value="dms">私信群聊</option>
+            <option value="dms">群聊私信</option>
           </select>
         </div>
 
         <div class="search-box">
           <svg class="search-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M21.71 20.29l-5.4-5.4A7.9 7.9 0 0 0 18 10a8 8 0 1 0-8 8 7.9 7.9 0 0 0 4.89-1.69l5.4 5.4a1 1 0 0 0 1.42 0 1 1 0 0 0 0-1.42zM4 10a6 6 0 1 1 6 6 6 6 0 0 1-6-6z"/></svg>
-          <input type="text" id="channelSearch" placeholder="搜索频道或线程..." autocomplete="off">
+          <input type="text" id="channelSearch" placeholder="全局搜索群聊、频道、好友..." autocomplete="off">
           <button id="searchClearBtn" class="search-clear-btn" style="display: none;">✕</button>
         </div>
       </div>

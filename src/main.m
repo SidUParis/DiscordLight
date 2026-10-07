@@ -170,6 +170,31 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+                                                         selector:@selector(handleTestNotification:)
+                                                             name:@"com.discordlight.test"
+                                                           object:nil];
+}
+
+- (void)handleTestNotification:(NSNotification *)note {
+    NSString *obj = (NSString *)note.object;
+    if ([obj hasPrefix:@"eval:"]) {
+        NSString *js = [obj substringFromIndex:5];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.webView evaluateJavaScript:js completionHandler:nil];
+        });
+    } else if ([obj isEqualToString:@"snapshot"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.webView takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *snapshot, NSError *error) {
+                if (snapshot) {
+                    NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:[snapshot TIFFRepresentation]];
+                    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+                    [png writeToFile:@"/tmp/discordlight_webview_snapshot.png" atomically:YES];
+                }
+            }];
+        });
+    }
 }
 
 - (void)saveConfig {
@@ -370,7 +395,20 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         });
         [self respondToJS:callback data:@{@"success": @YES}];
     }
+    else if ([action isEqualToString:@"takeSnapshot"]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self.webView takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *snapshot, NSError *error) {
+                if (snapshot) {
+                    NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:[snapshot TIFFRepresentation]];
+                    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+                    [png writeToFile:@"/tmp/discordlight_webview_snapshot.png" atomically:YES];
+                }
+            }];
+        });
+        [self respondToJS:callback data:@{@"success": @YES}];
+    }
 }
+
 
 #pragma mark - Advanced Native NSTouchBar
 

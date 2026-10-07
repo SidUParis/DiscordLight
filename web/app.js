@@ -41,7 +41,8 @@ const state = {
   activeThreads: {},   // parentChannelId -> thread[]
   currentTab: "pinned", // "pinned" | "servers" | "dms"
   servers: [],
-  dms: [],
+  groups: [], // Multi-person Group DMs (type 3)
+  dms: [],    // 1-on-1 DMs (type 1)
   pinned: [],
   channelsCache: {}, // serverId -> channels[]
   messages: [],
@@ -246,13 +247,91 @@ function adjustTextareaHeight() {
 async function renderChannelList() {
   channelList.innerHTML = "";
   const filter = channelSearch.value.trim().toLowerCase();
-  let items = [];
 
+  // 1. GLOBAL SEARCH MODE (Across Groups, Pinned, Channels, and DMs)
+  if (filter) {
+    const matchedGroups = state.groups.filter(g => 
+      g.name.toLowerCase().includes(filter) ||
+      g.rawName.toLowerCase().includes(filter) ||
+      g.memberNames.some(n => n.toLowerCase().includes(filter)) ||
+      g.memberUsernames.some(u => u.toLowerCase().includes(filter))
+    );
+
+    const matchedPinned = state.pinned.filter(p => 
+      p.name.toLowerCase().includes(filter) || 
+      (p.server && p.server.toLowerCase().includes(filter))
+    );
+
+    const matchedChannels = [];
+    Object.entries(state.channelsCache).forEach(([sId, chs]) => {
+      chs.forEach(c => {
+        if (c.name.toLowerCase().includes(filter) || (c.server && c.server.toLowerCase().includes(filter))) {
+          matchedChannels.push(c);
+        }
+      });
+    });
+
+    const matchedDMs = state.dms.filter(d => 
+      d.name.toLowerCase().includes(filter) ||
+      d.memberNames.some(n => n.toLowerCase().includes(filter)) ||
+      d.memberUsernames.some(u => u.toLowerCase().includes(filter))
+    );
+
+    const totalMatches = matchedGroups.length + matchedPinned.length + matchedChannels.length + matchedDMs.length;
+    if (totalMatches === 0) {
+      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">未找到包含 “${escapeHTML(filter)}” 的群聊、频道或好友</div>`;
+      return;
+    }
+
+    if (matchedGroups.length > 0) {
+      renderSectionHeader(`👥 多人群聊 (${matchedGroups.length})`);
+      matchedGroups.forEach(g => renderChannelItem(g, "👥"));
+    }
+
+    if (matchedPinned.length > 0) {
+      renderSectionHeader(`⭐ 常用关注 (${matchedPinned.length})`);
+      matchedPinned.forEach(p => renderChannelItem(p, p.icon || "#"));
+    }
+
+    if (matchedChannels.length > 0) {
+      renderSectionHeader(`💬 服务器频道 (${matchedChannels.length})`);
+      matchedChannels.forEach(c => renderChannelItem(c, "#"));
+    }
+
+    if (matchedDMs.length > 0) {
+      renderSectionHeader(`👤 私信好友 (${matchedDMs.length})`);
+      matchedDMs.forEach(d => renderChannelItem(d, "👤"));
+    }
+    return;
+  }
+
+  // 2. TAB VIEW (Normal browsing)
   if (state.currentTab === "pinned") {
-    items = state.pinned.map(p => ({ ...p, icon: "#" }));
-  } else if (state.currentTab === "dms") {
-    items = state.dms.map(d => ({ ...d, icon: d.type === 3 ? "👥" : "👤" }));
-  } else {
+    if (state.pinned.length === 0) {
+      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">暂无关注，轻触右上角“关注”添加常用群聊或频道</div>`;
+      return;
+    }
+    renderSectionHeader(`常用工作空间 (${state.pinned.length})`);
+    state.pinned.forEach(p => renderChannelItem(p, p.icon || "#", true));
+  } 
+  else if (state.currentTab === "dms") {
+    // Top Section: Multi-person Group DMs
+    if (state.groups.length > 0) {
+      renderSectionHeader(`👥 多人群聊 (${state.groups.length})`);
+      state.groups.forEach(g => renderChannelItem(g, "👥"));
+    }
+
+    // Bottom Section: 1-on-1 DMs
+    if (state.dms.length > 0) {
+      renderSectionHeader(`👤 私信会话 (${state.dms.length})`);
+      state.dms.forEach(d => renderChannelItem(d, "👤"));
+    }
+
+    if (state.groups.length === 0 && state.dms.length === 0) {
+      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">暂无私聊或群聊</div>`;
+    }
+  } 
+  else {
     // Specific Server Channels
     const serverId = serverSelect.value;
     if (!state.channelsCache[serverId]) {
@@ -260,42 +339,56 @@ async function renderChannelList() {
       const res = await callNative("fetchGuildChannels", { guildId: serverId });
       state.channelsCache[serverId] = (res.channels || [])
         .filter(c => c.type === 0 || c.type === 5)
-        .map(c => ({ id: c.id, name: `# ${c.name}`, server: serverSelect.options[serverSelect.selectedIndex]?.text || "" }));
+        .map(c => ({ id: c.id, name: `# ${c.name}`, server: serverSelect.options[serverSelect.selectedIndex]?.text || "", type: c.type }));
     }
-    items = (state.channelsCache[serverId] || []).map(c => ({ ...c, icon: "#" }));
+    const items = state.channelsCache[serverId] || [];
+    renderSectionHeader(`文字频道 (${items.length})`);
+    items.forEach(c => renderChannelItem(c, "#", true));
   }
+}
 
-  if (filter) {
-    items = items.filter(i => i.name.toLowerCase().includes(filter) || (i.server && i.server.toLowerCase().includes(filter)));
-  }
-
-  if (items.length === 0) {
-    channelList.innerHTML = `<div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center;">未找到匹配频道</div>`;
-    return;
-  }
-
+function renderSectionHeader(text) {
   const headerDiv = document.createElement("div");
   headerDiv.className = "channel-section-header";
-  headerDiv.innerText = state.currentTab === "pinned" ? "常用工作频道" : (state.currentTab === "dms" ? "私聊与群聊" : "文字频道");
+  headerDiv.innerText = text;
   channelList.appendChild(headerDiv);
+}
 
-  items.forEach(item => {
-    const isChannelActive = state.activeChannel.id === item.id;
-    const cleanDisplayName = item.name.replace(/^[#⭐👥👤\s]+/, "").replace(/\s*\([^)]*\)/, "");
-    const div = document.createElement("div");
-    div.className = `channel-item ${isChannelActive ? "active" : ""}`;
-    div.innerHTML = `
-      <span class="channel-icon">${item.icon || "#"}</span>
-      <span class="channel-name" title="${escapeAttr(cleanDisplayName)}">${escapeHTML(cleanDisplayName)}</span>
-      ${item.server ? `<span class="server-tag">${escapeHTML(item.server)}</span>` : ""}
-    `;
-    div.addEventListener("click", () => {
-      state.parentChannel = null;
-      switchChannel(item);
-    });
-    channelList.appendChild(div);
+function renderChannelItem(item, icon, allowThreads = false) {
+  const isChannelActive = state.activeChannel.id === item.id;
+  const cleanDisplayName = item.name.replace(/^[#⭐👥👤\s]+/, "");
+  const div = document.createElement("div");
+  div.className = `channel-item ${isChannelActive ? "active" : ""}`;
 
-    // Threads under this channel
+  let badgeHTML = "";
+  if (item.type === 3 && item.memberCount) {
+    badgeHTML = `<span class="channel-badge">${item.memberCount}人</span>`;
+  } else if (item.server && state.currentTab !== "servers") {
+    badgeHTML = `<span class="server-tag">${escapeHTML(item.server)}</span>`;
+  }
+
+  let subtitleHTML = "";
+  if (item.subtitle) {
+    subtitleHTML = `<div class="channel-subtitle" title="${escapeAttr(item.subtitle)}">${escapeHTML(item.subtitle)}</div>`;
+  }
+
+  div.innerHTML = `
+    <span class="channel-icon">${item.icon || icon || "#"}</span>
+    <div class="channel-text-group">
+      <div class="channel-name" title="${escapeAttr(cleanDisplayName)}">${escapeHTML(cleanDisplayName)}</div>
+      ${subtitleHTML}
+    </div>
+    ${badgeHTML}
+  `;
+
+  div.addEventListener("click", () => {
+    state.parentChannel = null;
+    switchChannel(item);
+  });
+  channelList.appendChild(div);
+
+  // Active Threads if in channel
+  if (allowThreads) {
     const threads = state.activeThreads[item.id] || [];
     threads.forEach(t => {
       const isThreadActive = state.activeChannel.id === t.id;
@@ -311,7 +404,7 @@ async function renderChannelList() {
       });
       channelList.appendChild(tDiv);
     });
-  });
+  }
 }
 
 function switchChannel(channel) {
@@ -319,7 +412,8 @@ function switchChannel(channel) {
   state.activeChannel = channel;
   updateHeader();
   renderChannelList();
-  messagesList.innerHTML = `<div style="padding:30px;color:var(--text-muted);text-align:center;">⏳ 正在载入 #${escapeHTML(channel.name.replace(/^[#⭐👥👤\s]+/, ""))}...</div>`;
+  const icon = channel.type === 3 ? "👥 " : (channel.type === 1 ? "👤 " : "# ");
+  messagesList.innerHTML = `<div style="padding:30px;color:var(--text-muted);text-align:center;">⏳ 正在载入 ${icon}${escapeHTML(channel.name.replace(/^[#⭐👥👤\s]+/, ""))}...</div>`;
   state.lastMessageId = null;
   state.messages = [];
   notifyTouchBar();
@@ -360,6 +454,8 @@ window.returnToParentChannel = function() {
 
 function updateHeader() {
   const isThread = !!state.parentChannel;
+  const isGroup = state.activeChannel.type === 3;
+  const isDM = state.activeChannel.type === 1;
 
   if (isThread) {
     if (threadBackBtn) {
@@ -372,6 +468,18 @@ function updateHeader() {
     activeChannelTitle.innerText = cleanTitle;
     activeChannelServer.innerText = `子线程 · 来自 #${state.parentChannel.name.replace(/^[#⭐👥👤🧵\s]+/, "")}`;
     messageInput.placeholder = `在线程【${cleanTitle}】中发言... (@ 唤起机器人，回车发送)`;
+  } else if (isGroup) {
+    if (threadBackBtn) threadBackBtn.style.display = "none";
+    if (channelHash) channelHash.innerText = "👥";
+    activeChannelTitle.innerText = state.activeChannel.name;
+    activeChannelServer.innerText = state.activeChannel.subtitle || "多人群聊";
+    messageInput.placeholder = `在群聊【${state.activeChannel.name}】中发言... (@ 唤起群成员，回车发送)`;
+  } else if (isDM) {
+    if (threadBackBtn) threadBackBtn.style.display = "none";
+    if (channelHash) channelHash.innerText = "👤";
+    activeChannelTitle.innerText = state.activeChannel.name;
+    activeChannelServer.innerText = state.activeChannel.subtitle || "私信会话";
+    messageInput.placeholder = `发送私信给 ${state.activeChannel.name}... (回车发送)`;
   } else {
     if (threadBackBtn) threadBackBtn.style.display = "none";
     if (channelHash) channelHash.innerText = "#";
@@ -387,28 +495,28 @@ function updateHeader() {
   updateAgentChips();
 }
 
-// Quick Agent Chips Bar (AI Developer First)
+// Quick Agent / Member Chips Bar
 function updateAgentChips() {
   if (!inputAgentChips) return;
   inputAgentChips.innerHTML = "";
 
-  const bots = getChannelBots();
-  if (bots.length === 0) {
+  const chips = getChannelBots();
+  if (chips.length === 0) {
     inputAgentChips.style.display = "none";
     return;
   }
 
   inputAgentChips.style.display = "flex";
-  bots.forEach(bot => {
+  chips.forEach(item => {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "agent-chip";
     chip.innerHTML = `
       <span class="agent-chip-dot"></span>
-      <span>@${escapeHTML(bot.name)}</span>
+      <span>@${escapeHTML(item.name)}</span>
     `;
     chip.addEventListener("click", () => {
-      insertMentionFromTouchBar(bot.name);
+      insertMentionFromTouchBar(item.name);
     });
     inputAgentChips.appendChild(chip);
   });
@@ -417,6 +525,19 @@ function updateAgentChips() {
 function getChannelBots() {
   const activeBots = [];
   const seenBotIds = new Set();
+
+  // In Group DM: Show group members for quick 1-tap mention
+  if (state.activeChannel && state.activeChannel.type === 3 && state.activeChannel.recipients) {
+    state.activeChannel.recipients.forEach(r => {
+      const name = r.global_name || r.username;
+      activeBots.push({
+        id: r.id,
+        name: name,
+        username: r.username
+      });
+    });
+    return activeBots;
+  }
 
   if (state.messages && state.messages.length > 0) {
     state.messages.forEach(m => {
@@ -448,7 +569,6 @@ function getChannelBots() {
   // Dynamic fallback from known bots
   Object.values(KNOWN_BOTS).forEach(b => {
     if (b && !seenBotIds.has(b.id)) {
-      // include top bots
       seenBotIds.add(b.id);
       activeBots.push(b);
     }
@@ -470,10 +590,15 @@ async function togglePinCurrentChannel() {
   if (isPinned) {
     state.pinned = state.pinned.filter(p => p.id !== state.activeChannel.id);
   } else {
+    const isGroup = state.activeChannel.type === 3;
+    const isDM = state.activeChannel.type === 1;
     state.pinned.push({
       id: state.activeChannel.id,
       name: state.activeChannel.name,
-      server: state.activeChannel.server
+      server: state.activeChannel.server || (isGroup ? "多人群聊" : (isDM ? "私信" : "")),
+      icon: isGroup ? "👥" : (isDM ? "👤" : "#"),
+      type: state.activeChannel.type,
+      subtitle: state.activeChannel.subtitle
     });
   }
   updateHeader();
@@ -481,21 +606,70 @@ async function togglePinCurrentChannel() {
   await callNative("saveConfig", { pinned_channels: state.pinned });
 }
 
-// Fetch Servers & DMs
+// Fetch Servers, Groups & DMs
 async function loadServersAndDMs() {
   const dmRes = await callNative("fetchDMs");
   if (dmRes && dmRes.dms) {
-    state.dms = dmRes.dms.map(d => {
-      let name = d.name;
-      if (!name && d.recipients) {
-        name = d.recipients.map(r => r.username).join(", ");
+    const rawDms = dmRes.dms;
+
+    // Sort all conversations by activity (most recent first)
+    rawDms.sort((a, b) => {
+      const idA = BigInt(a.last_message_id || "0");
+      const idB = BigInt(b.last_message_id || "0");
+      if (idB > idA) return 1;
+      if (idB < idA) return -1;
+      return 0;
+    });
+
+    state.groups = [];
+    state.dms = [];
+
+    rawDms.forEach(d => {
+      const isGroup = d.type === 3;
+      const recips = d.recipients || [];
+      const memberNames = recips.map(r => r.global_name || r.username);
+      const memberUsernames = recips.map(r => r.username);
+
+      // Populate knownUsers for autocomplete @
+      recips.forEach(r => {
+        state.knownUsers[r.id] = {
+          name: r.global_name || r.username,
+          username: r.username,
+          bot: !!r.bot
+        };
+      });
+
+      let title = d.name;
+      if (!title) {
+        if (isGroup) {
+          title = memberNames.join(", ") || "未命名群聊";
+        } else {
+          title = memberNames[0] || (recips[0] ? recips[0].username : "私信");
+        }
       }
-      return {
+
+      const item = {
         id: d.id,
-        name: name || "Group DM",
-        server: d.type === 3 ? "多人群聊" : "私信",
-        type: d.type
+        name: title,
+        rawName: d.name || "",
+        type: d.type,
+        icon: isGroup ? "👥" : "👤",
+        lastMessageId: d.last_message_id || "",
+        recipients: recips,
+        memberNames: memberNames,
+        memberUsernames: memberUsernames,
+        memberCount: recips.length + 1,
+        subtitle: isGroup 
+          ? (d.name ? `${memberNames.join(", ")} · ${recips.length + 1}人` : `多人群聊 · ${recips.length + 1}人`)
+          : (recips[0] ? `@${recips[0].username}` : "私信会话"),
+        server: isGroup ? "多人群聊" : "私信会话"
       };
+
+      if (isGroup) {
+        state.groups.push(item);
+      } else {
+        state.dms.push(item);
+      }
     });
   }
 
@@ -509,6 +683,19 @@ async function loadServersAndDMs() {
       opt.innerText = (g.owner ? "👑 " : "📁 ") + g.name;
       serverSelect.appendChild(opt);
     });
+
+    // Background pre-cache channels for servers for instant global search
+    for (const g of state.servers.slice(0, 6)) {
+      if (!state.channelsCache[g.id]) {
+        callNative("fetchGuildChannels", { guildId: g.id }).then(res => {
+          if (res && res.channels) {
+            state.channelsCache[g.id] = res.channels
+              .filter(c => c.type === 0 || c.type === 5)
+              .map(c => ({ id: c.id, name: `# ${c.name}`, server: g.name, type: c.type }));
+          }
+        });
+      }
+    }
   }
 }
 

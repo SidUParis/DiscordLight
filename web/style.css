@@ -272,6 +272,34 @@ body {
   text-overflow: ellipsis;
 }
 
+.channel-text-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.channel-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.channel-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background-color: rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .server-tag {
   font-size: 10px;
   color: var(--text-muted);
