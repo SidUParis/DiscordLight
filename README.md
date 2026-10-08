@@ -11,7 +11,7 @@ English | [中文说明](./README_CN.md) | [Handover Doc](./HANDOVER.md)
 - **🚀 Ultra Lightweight & Native**
   - Consumes **< 80 MB RAM** (vs 1.5 GB+ on the official Electron client).
   - Stays at **0% CPU** during idle, saving battery on MacBook Pro / Air.
-  - Native macOS styling matching Dark Aqua Obsidian aesthetics.
+  - Native macOS dark UI (Graphite Console): monochrome stroke icons, agent-first approval cards.
 
 - **🎛 Advanced Touch Bar Integration**
   - **Persistent `@ Agents` Popover**: Resolves the classic Touch Bar conflict where system IME candidate bars push away mention shortcuts. Tap `@ Agents` at any time during typing to insert a bot mention without losing cursor focus.
@@ -83,7 +83,7 @@ DiscordLight/
 │   └── Info.plist           # macOS bundle metadata
 ├── web/
 │   ├── index.html           # Lightweight modern web DOM
-│   ├── style.css            # Discord Obsidian Dark theme
+│   ├── style.css            # Graphite Console theme (native macOS dark)
 │   └── app.js               # Client logic, interactions & autocomplete
 └── assets/
     ├── AppIcon.icns         # High-resolution squircle app icon

@@ -8,6 +8,13 @@ static inline NSString *SafeString(id val) {
     return (NSString *)val;
 }
 
+// JSON text is spliced into scripts handed to evaluateJavaScript:. NSJSONSerialization leaves U+2028 / U+2029 raw
+// inside strings; JavaScript engines older than ES2019 treat them as line terminators, which breaks the script.
+static inline NSString *JSSafeJSON(NSString *json) {
+    json = [json stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\\u2028"];
+    return [json stringByReplacingOccurrencesOfString:@"\u2029" withString:@"\\u2029"];
+}
+
 // Touch Bar Identifiers
 static NSTouchBarItemIdentifier const TBItemIdentifierLogo = @"com.discordlight.touchbar.logo";
 static NSTouchBarItemIdentifier const TBItemIdentifierChannelTitle = @"com.discordlight.touchbar.channel";
@@ -19,7 +26,24 @@ static NSString * const TBItemIdentifierPopoverPinPrefix = @"com.discordlight.to
 static NSString * const TBItemIdentifierPinPrefix = @"com.discordlight.touchbar.pin";
 static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlight.touchbar.refresh";
 
-@interface AppDelegate : NSResponder <NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate, NSTouchBarDelegate>
+// Invisible strip over the sidebar's top edge. With a full-size content view the
+// title bar is gone, and WKWebView swallows mouse-downs, so this view hands the
+// drag back to the window (and keeps double-click-to-zoom like a real title bar).
+@interface DLDragStripView : NSView
+@end
+
+@implementation DLDragStripView
+- (BOOL)mouseDownCanMoveWindow { return YES; }
+- (void)mouseDown:(NSEvent *)event {
+    if (event.clickCount == 2) {
+        [self.window performZoom:nil];
+        return;
+    }
+    [self.window performWindowDragWithEvent:event];
+}
+@end
+
+@interface AppDelegate : NSResponder <NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSTouchBarDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) NSString *token;
@@ -136,19 +160,28 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     // 3. Create Modern Window
     NSRect frame = NSMakeRect(120, 100, 1120, 740);
     self.window = [[NSWindow alloc] initWithContentRect:frame
-                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
     self.window.title = @"DiscordLight";
     self.window.minSize = NSMakeSize(760, 500);
     self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     self.window.titlebarAppearsTransparent = YES;
+    self.window.titleVisibility = NSWindowTitleHidden;
     [self.window center];
 
     self.webView = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:webConfig];
     self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.webView.navigationDelegate = self;
+    self.webView.UIDelegate = self;
     [self.window.contentView addSubview:self.webView];
+
+    // Drag strip: sidebar width (240) x the 38pt traffic-light band at the top.
+    // Matches .sidebar-header's padding-top in style.css; nothing interactive lives there.
+    NSRect contentBounds = self.window.contentView.bounds;
+    DLDragStripView *dragStrip = [[DLDragStripView alloc] initWithFrame:NSMakeRect(0, NSMaxY(contentBounds) - 38, 240, 38)];
+    dragStrip.autoresizingMask = NSViewMinYMargin;
+    [self.window.contentView addSubview:dragStrip positioned:NSWindowAbove relativeTo:self.webView];
 
     // 4. Load Web Interface
     NSURL *webURL = [[NSBundle mainBundle] URLForResource:@"index" withExtension:@"html" subdirectory:@"web"];
@@ -171,14 +204,20 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
-                                                         selector:@selector(handleTestNotification:)
-                                                             name:@"com.discordlight.test"
-                                                           object:nil];
+    // Debug automation hook (eval / snapshot via a distributed notification). Any local process can post that
+    // notification, so the observer only exists when the app is launched with DISCORDLIGHT_DEBUG set (non-empty).
+    const char *debugFlag = getenv("DISCORDLIGHT_DEBUG");
+    if (debugFlag && debugFlag[0] != '\0') {
+        [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+                                                             selector:@selector(handleTestNotification:)
+                                                                 name:@"com.discordlight.test"
+                                                               object:nil];
+    }
 }
 
+// Only registered when DISCORDLIGHT_DEBUG is set (see applicationDidFinishLaunching:)
 - (void)handleTestNotification:(NSNotification *)note {
-    NSString *obj = (NSString *)note.object;
+    NSString *obj = SafeString(note.object);
     if ([obj hasPrefix:@"eval:"]) {
         NSString *js = [obj substringFromIndex:5];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -215,10 +254,16 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 }
 
 - (void)respondToJS:(NSString *)callback data:(NSDictionary *)data {
+    // The callback name is spliced into the script as an identifier, so it may only be letters, digits and "_"
+    // (callNative() in app.js generates "cb_" + base36).
+    // NOTE: the Makefile compiles without -fobjc-arc, so never cache autoreleased objects in statics here.
+    NSCharacterSet *notIdentifier = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
+    if (callback.length == 0 || [callback rangeOfCharacterFromSet:notIdentifier].location != NSNotFound) return;
+
     NSError *err = nil;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:data options:0 error:&err];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    NSString *js = [NSString stringWithFormat:@"window.%@(%@);", callback, jsonStr ?: @"{}"];
+    NSString *jsonStr = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
+    NSString *js = [NSString stringWithFormat:@"window.%@(%@);", callback, jsonStr ? JSSafeJSON(jsonStr) : @"{}"];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.webView evaluateJavaScript:js completionHandler:nil];
     });
@@ -233,6 +278,8 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 
     if ([action isEqualToString:@"getConfig"]) {
         NSMutableDictionary *safeConf = [NSMutableDictionary dictionaryWithDictionary:self.config];
+        // The token never crosses the bridge: the web layer only needs to know whether one exists
+        [safeConf removeObjectForKey:@"token"];
         safeConf[@"hasToken"] = @(self.token.length > 0);
         [self respondToJS:callback data:safeConf];
     }
@@ -243,6 +290,8 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         }
         if (body[@"pinned_channels"]) self.config[@"pinned_channels"] = body[@"pinned_channels"];
         if (body[@"last_channel_id"]) self.config[@"last_channel_id"] = body[@"last_channel_id"];
+        // Sidebar UI state (collapsed sections)
+        if ([body[@"ui"] isKindOfClass:[NSDictionary class]]) self.config[@"ui"] = body[@"ui"];
         [self saveConfig];
         [self respondToJS:callback data:@{@"success": @YES}];
     }
@@ -409,6 +458,34 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     }
 }
 
+#pragma mark - Navigation Policy
+
+// The web view holds the native bridge, so it only ever displays the bundled local page.
+// Links in messages (http / https / mailto) are handed to the system; everything else is dropped.
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+
+    if ([scheme isEqualToString:@"file"] || [url.absoluteString isEqualToString:@"about:blank"]) {
+        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
+    }
+
+    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"] || [scheme isEqualToString:@"mailto"]) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
+    decisionHandler(WKNavigationActionPolicyCancel);
+}
+
+// target="_blank" links and window.open(): never create a second web view, open http(s) in the system browser instead
+- (nullable WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures {
+    NSURL *url = navigationAction.request.URL;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
+    return nil;
+}
 
 #pragma mark - Advanced Native NSTouchBar
 
@@ -589,6 +666,16 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 
 #pragma mark - Touch Bar Actions
 
+// Quotes one string as a JS string literal (JSON-encoded). Bot / channel names come from Discord,
+// so they must never be pasted raw into the script handed to evaluateJavaScript:.
+- (NSString *)jsStringLiteral:(NSString *)value {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@[value ?: @""] options:0 error:nil];
+    NSString *json = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    if (json.length < 2) return @"\"\"";
+    // json is ["..."]: drop the surrounding brackets, keep the quoted literal
+    return JSSafeJSON([json substringWithRange:NSMakeRange(1, json.length - 2)]);
+}
+
 - (void)touchBarLogoClicked:(id)sender {
     [self.webView evaluateJavaScript:@"window.touchBarAction && window.touchBarAction('logo');" completionHandler:nil];
 }
@@ -598,7 +685,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     if (idx < self.currentBots.count) {
         NSDictionary *bot = self.currentBots[idx];
         NSString *botName = SafeString(bot[@"name"]);
-        NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar('%@');", botName];
+        NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar(%@);", [self jsStringLiteral:botName]];
         [self.webView evaluateJavaScript:js completionHandler:nil];
     }
 }
@@ -608,7 +695,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     if (idx < self.currentBots.count) {
         NSDictionary *bot = self.currentBots[idx];
         NSString *botName = SafeString(bot[@"name"]);
-        NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar('%@');", botName];
+        NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar(%@);", [self jsStringLiteral:botName]];
         [self.webView evaluateJavaScript:js completionHandler:nil];
         
         // Auto-close popover to return to typing & IME
@@ -626,7 +713,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     if (idx < self.currentPinned.count) {
         NSDictionary *pin = self.currentPinned[idx];
         NSString *pinId = SafeString(pin[@"id"]);
-        NSString *js = [NSString stringWithFormat:@"window.switchChannelById && window.switchChannelById('%@');", pinId];
+        NSString *js = [NSString stringWithFormat:@"window.switchChannelById && window.switchChannelById(%@);", [self jsStringLiteral:pinId]];
         [self.webView evaluateJavaScript:js completionHandler:nil];
         
         [self.window.touchBar.itemIdentifiers enumerateObjectsUsingBlock:^(NSTouchBarItemIdentifier ident, NSUInteger i, BOOL *stop) {

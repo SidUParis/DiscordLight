@@ -33,13 +33,78 @@ const KNOWN_ROLES = {
   "1510973611467608080": "Hermes"
 };
 
+// Stroke Icon Set (monochrome, 24x24 grid, inherits currentColor)
+const ICON_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+const STAR_POINTS = "12,3.2 14.29,9.44 20.94,9.7 15.71,13.81 17.53,20.2 12,16.5 6.47,20.2 8.29,13.81 3.06,9.7 9.71,9.44";
+const ICONS = {
+  channel: '<path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3L8 21"/><path d="M16 3l-2 18"/>',
+  group: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4"/><path d="M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
+  dm: '<circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/>',
+  thread: '<path d="M7 5v7a3 3 0 0 0 3 3h7"/><path d="M14 12l3 3-3 3"/>',
+  star: `<polygon points="${STAR_POINTS}"/>`,
+  starFilled: `<polygon fill="currentColor" points="${STAR_POINTS}"/>`,
+  refresh: '<path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 3.5v5h-5"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+  check: '<path d="M5 12l5 5L20 7"/>',
+  x: '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
+  shield: '<path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z"/>',
+  chevronRight: '<path d="M9 6l6 6-6 6"/>',
+  chevronDown: '<path d="M6 9l6 6 6-6"/>',
+  arrowUp: '<path d="M12 19V5"/><path d="M6 11l6-6 6 6"/>',
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4L10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
+};
+
+function iconSVG(name, size = 16) {
+  const body = ICONS[name] || ICONS.channel;
+  return `<svg class="icon" width="${size}" height="${size}" ${ICON_ATTRS}>${body}</svg>`;
+}
+
+// Icon values saved by older builds were emoji glyphs; map them (and the new string names) to icon names.
+// Legacy values: U+1F465 (two people) -> group, U+1F464 (one person) -> dm, U+1F9F5 (spool) -> thread, "#" -> channel
+function legacyIconName(icon) {
+  const value = String(icon || "");
+  if (value === "group" || value === "dm" || value === "thread" || value === "channel") return value;
+  if (value.includes("\u{1F465}")) return "group";
+  if (value.includes("\u{1F464}")) return "dm";
+  if (value.includes("\u{1F9F5}")) return "thread";
+  return "channel";
+}
+
+// Server labels saved by older builds carry a crown / folder glyph prefix (U+1F451 / U+1F4C1); strip it for display
+function cleanServerName(name) {
+  return String(name || "").replace(/^(?:\u{1F451}|\u{1F4C1}|\s)+/u, "");
+}
+
+// Deterministic Avatar Colors: flat [background, foreground] pairs picked by a hash of the author id
+const AVATAR_PALETTE = {
+  bot: [["#B9B2FF", "#1B1B1D"], ["#8FD3C7", "#1B1B1D"], ["#E6E6E6", "#1B1B1D"], ["#F4C7A1", "#1B1B1D"]],
+  human: [["#D7B48A", "#1B1B1D"], ["#9FC2E8", "#1B1B1D"], ["#C9D7A3", "#1B1B1D"], ["#E8B4C8", "#1B1B1D"]]
+};
+
+function avatarStyle(id, isBot) {
+  const key = String(id || "");
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  const palette = isBot ? AVATAR_PALETTE.bot : AVATAR_PALETTE.human;
+  const pair = palette[hash % palette.length];
+  return `background:${pair[0]};color:${pair[1]}`;
+}
+
+function isBotId(id) {
+  const known = state.knownUsers[id];
+  return !!(KNOWN_BOTS[id] || (known && known.bot));
+}
+
 // Client State
 const state = {
   currentUser: null,
   activeChannel: { id: "", name: "加载中...", server: "" },
   parentChannel: null, // Set when inside a thread
   activeThreads: {},   // parentChannelId -> thread[]
-  currentTab: "pinned", // "pinned" | "servers" | "dms"
   servers: [],
   groups: [], // Multi-person Group DMs (type 3)
   dms: [],    // 1-on-1 DMs (type 1)
@@ -50,8 +115,13 @@ const state = {
   knownUsers: {},
   mentionQuery: null,
   mentionIndex: 0,
-  activeMentionCandidates: []
+  activeMentionCandidates: [],
+  resolvedInteractions: {}, // messageId -> { label, time, customId } for approvals answered in this session
+  ui: { collapsed: [] }     // Sidebar section keys the user has collapsed; persisted as config.ui
 };
+
+// Sidebar sections, top to bottom: 常用关注 / 群聊与私信 / 服务器
+const SECTION_KEYS = ["pinned", "dms", "servers"];
 
 // Native Cocoa Bridge Helper
 function callNative(action, data = {}) {
@@ -74,8 +144,6 @@ function callNative(action, data = {}) {
 }
 
 // DOM Elements
-const workspaceTabs = document.getElementById("workspaceTabs");
-const serverPickerRow = document.getElementById("serverPickerRow");
 const serverSelect = document.getElementById("serverSelect");
 const channelSearch = document.getElementById("channelSearch");
 const searchClearBtn = document.getElementById("searchClearBtn");
@@ -114,6 +182,9 @@ async function init() {
   if (cfg.pinned_channels && cfg.pinned_channels.length > 0) {
     state.pinned = cfg.pinned_channels;
   }
+  if (cfg.ui && Array.isArray(cfg.ui.collapsed)) {
+    state.ui.collapsed = cfg.ui.collapsed.filter(key => SECTION_KEYS.includes(key));
+  }
 
   // 2. Load User Profile
   const userRes = await callNative("fetchCurrentUser");
@@ -122,6 +193,7 @@ async function init() {
     const displayName = state.currentUser.global_name || state.currentUser.username;
     if (myUsername) myUsername.innerText = displayName;
     if (myAvatar) myAvatar.innerText = (displayName[0] || "U").toUpperCase();
+    if (myAvatar) myAvatar.setAttribute("style", avatarStyle(state.currentUser.id, false));
     state.knownUsers[state.currentUser.id] = {
       name: displayName,
       username: state.currentUser.username,
@@ -164,7 +236,13 @@ async function init() {
 }
 
 // Event Bindings
+let eventsBound = false;
+
 function bindEvents() {
+  // init() runs again after the token is saved; the listeners must only be attached once
+  if (eventsBound) return;
+  eventsBound = true;
+
   // Setup Modal Token Save
   if (saveTokenBtn) {
     saveTokenBtn.addEventListener("click", async () => {
@@ -177,29 +255,19 @@ function bindEvents() {
     });
   }
 
-  // Workspace Tabs
-  if (workspaceTabs) {
-    workspaceTabs.addEventListener("click", (e) => {
-      const tabBtn = e.target.closest(".ws-tab");
-      if (!tabBtn) return;
-      document.querySelectorAll(".ws-tab").forEach(t => t.classList.remove("active"));
-      tabBtn.classList.add("active");
-      state.currentTab = tabBtn.dataset.tab;
-
-      if (state.currentTab === "servers") {
-        serverPickerRow.style.display = "block";
-      } else {
-        serverPickerRow.style.display = "none";
-      }
-
-      channelSearch.value = "";
-      renderChannelList();
+  // Sidebar: section headers collapse / expand their rows
+  if (channelList) {
+    channelList.addEventListener("click", (e) => {
+      const toggle = e.target.closest(".section-toggle");
+      if (!toggle) return;
+      const key = toggle.dataset.section;
+      setSectionCollapsed(key, !state.ui.collapsed.includes(key));
     });
   }
 
+  // Server picker (first row of the 服务器 section)
   if (serverSelect) {
     serverSelect.addEventListener("change", () => {
-      channelSearch.value = "";
       renderChannelList();
     });
   }
@@ -208,14 +276,63 @@ function bindEvents() {
     channelSearch.addEventListener("input", () => {
       searchClearBtn.style.display = channelSearch.value ? "block" : "none";
       renderChannelList();
+      channelList.scrollTop = 0;
     });
+    channelSearch.addEventListener("keydown", handleSearchKeyDown);
   }
 
   if (searchClearBtn) {
     searchClearBtn.addEventListener("click", () => {
-      channelSearch.value = "";
-      searchClearBtn.style.display = "none";
+      clearChannelSearch();
       renderChannelList();
+      channelSearch.focus();
+    });
+  }
+
+  // Cmd+K / Cmd+F: jump to the sidebar search. Command only: Ctrl+K (kill line) and Ctrl+F (forward char)
+  // are Cocoa text-editing keys and must keep working in the composer.
+  document.addEventListener("keydown", (e) => {
+    if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    const key = String(e.key || "").toLowerCase();
+    if (key !== "k" && key !== "f") return;
+    if (tokenModal && tokenModal.style.display !== "none") return;
+    e.preventDefault();
+    channelSearch.focus();
+    channelSearch.select();
+  });
+
+  // Message stream: one delegated listener. Markup built from message data carries data-act / data-* attributes
+  // and never inline handlers, so nothing from Discord is ever evaluated as script.
+  if (messagesList) {
+    messagesList.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-act]");
+      if (!el || !messagesList.contains(el)) return;
+      const d = el.dataset;
+      switch (d.act) {
+        case "component":
+          handleComponentClick(d.app, d.msg, d.custom, d.label, el);
+          break;
+        case "thread":
+          openThread(d.threadId, d.threadName, Number(d.count) || 0);
+          break;
+        case "mention":
+          insertMentionFromTouchBar(d.name);
+          break;
+        case "channel":
+          switchChannelById(d.id);
+          break;
+        case "copy":
+          copyCode(el);
+          break;
+      }
+    });
+  }
+
+  // Mention popover rows
+  if (mentionItems) {
+    mentionItems.addEventListener("click", (e) => {
+      const item = e.target.closest(".mention-item");
+      if (item) selectMention(Number(item.dataset.index));
     });
   }
 
@@ -243,8 +360,111 @@ function adjustTextareaHeight() {
   messageInput.style.height = (newHeight > 24 ? newHeight : 24) + "px";
 }
 
+// Sidebar Search
+function clearChannelSearch() {
+  channelSearch.value = "";
+  searchClearBtn.style.display = "none";
+}
+
+// Esc clears the field, or (when already empty) hands focus back to the composer; Enter opens the first result
+function handleSearchKeyDown(e) {
+  if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter / Esc belong to the candidate window
+
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if (channelSearch.value) {
+      clearChannelSearch();
+      renderChannelList();
+    } else {
+      channelSearch.blur();
+      messageInput.focus();
+    }
+    return;
+  }
+
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (!channelSearch.value.trim()) return;
+    const first = channelList.querySelector(".channel-item, .thread-subitem");
+    if (!first) return;
+    clearChannelSearch();
+    first.click(); // the row's own handler switches channel and re-renders the list (now back to the sections)
+    messageInput.focus();
+  }
+}
+
+// Sidebar Sections
+function setSectionCollapsed(key, collapsed) {
+  if (!SECTION_KEYS.includes(key) || state.ui.collapsed.includes(key) === collapsed) return;
+  state.ui.collapsed = collapsed
+    ? [...state.ui.collapsed, key]
+    : state.ui.collapsed.filter(k => k !== key);
+
+  // Flip the rendered section in place (keeps keyboard focus on the header button)
+  const toggle = channelList.querySelector(`.section-toggle[data-section="${key}"]`);
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    const body = toggle.nextElementSibling;
+    if (body) body.hidden = collapsed;
+  }
+  callNative("saveConfig", { ui: state.ui });
+}
+
+// Sections that currently list a row for this channel id
+function sectionsShowing(channelId) {
+  const keys = [];
+  if (state.pinned.some(p => p.id === channelId)) keys.push("pinned");
+  if (state.groups.some(g => g.id === channelId) || state.dms.some(d => d.id === channelId)) keys.push("dms");
+  if ((state.channelsCache[serverSelect.value] || []).some(c => c.id === channelId)) keys.push("servers");
+  return keys;
+}
+
+// Keep the selected row visible: a thread sits under its parent row, a channel from another server moves the
+// picker to that server, and if every section listing the row is collapsed the first of them opens.
+function revealActiveChannel() {
+  const target = state.parentChannel || state.activeChannel;
+  if (!target || !target.id) return;
+
+  let keys = sectionsShowing(target.id);
+  if (keys.length === 0) {
+    const serverId = Object.keys(state.channelsCache).find(sId => state.channelsCache[sId].some(c => c.id === target.id));
+    if (serverId && state.servers.some(g => g.id === serverId)) {
+      serverSelect.value = serverId;
+      keys = ["servers"];
+    }
+  }
+  if (keys.length > 0 && keys.every(k => state.ui.collapsed.includes(k))) {
+    setSectionCollapsed(keys[0], false);
+  }
+}
+
+// Text channels of one server: fetched once, cached in state.channelsCache, concurrent callers share the request
+const pendingChannelFetches = {};
+
+function ensureServerChannels(serverId) {
+  if (state.channelsCache[serverId]) return Promise.resolve(state.channelsCache[serverId]);
+  if (!pendingChannelFetches[serverId]) {
+    const server = state.servers.find(g => g.id === serverId);
+    const serverName = server ? server.name : "";
+    pendingChannelFetches[serverId] = callNative("fetchGuildChannels", { guildId: serverId }).then(res => {
+      delete pendingChannelFetches[serverId];
+      if (!res || !Array.isArray(res.channels)) return [];
+      state.channelsCache[serverId] = res.channels
+        .filter(c => c.type === 0 || c.type === 5)
+        .map(c => ({ id: c.id, name: `# ${c.name}`, server: serverName, type: c.type }));
+      return state.channelsCache[serverId];
+    });
+  }
+  return pendingChannelFetches[serverId];
+}
+
 // Render Channels & Threads
+let channelListRenderSeq = 0;
+
 async function renderChannelList() {
+  const renderId = ++channelListRenderSeq;
+  const keepScroll = channelList.scrollTop;
+  const pickerHadFocus = document.activeElement === serverSelect;
   channelList.innerHTML = "";
   const filter = channelSearch.value.trim().toLowerCase();
 
@@ -279,72 +499,107 @@ async function renderChannelList() {
 
     const totalMatches = matchedGroups.length + matchedPinned.length + matchedChannels.length + matchedDMs.length;
     if (totalMatches === 0) {
-      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">未找到包含 “${escapeHTML(filter)}” 的群聊、频道或好友</div>`;
+      channelList.innerHTML = `<div class="state-empty">未找到包含 “${escapeHTML(filter)}” 的群聊、频道或好友</div>`;
       return;
     }
 
     if (matchedGroups.length > 0) {
-      renderSectionHeader(`👥 多人群聊 (${matchedGroups.length})`);
-      matchedGroups.forEach(g => renderChannelItem(g, "👥"));
+      renderSectionHeader(`多人群聊 (${matchedGroups.length})`);
+      matchedGroups.forEach(g => renderChannelItem(g, "group"));
     }
 
     if (matchedPinned.length > 0) {
-      renderSectionHeader(`⭐ 常用关注 (${matchedPinned.length})`);
-      matchedPinned.forEach(p => renderChannelItem(p, p.icon || "#"));
+      renderSectionHeader(`常用关注 (${matchedPinned.length})`);
+      matchedPinned.forEach(p => renderChannelItem(p, p.icon || "channel"));
     }
 
     if (matchedChannels.length > 0) {
-      renderSectionHeader(`💬 服务器频道 (${matchedChannels.length})`);
-      matchedChannels.forEach(c => renderChannelItem(c, "#"));
+      renderSectionHeader(`服务器频道 (${matchedChannels.length})`);
+      matchedChannels.forEach(c => renderChannelItem(c, "channel"));
     }
 
     if (matchedDMs.length > 0) {
-      renderSectionHeader(`👤 私信好友 (${matchedDMs.length})`);
-      matchedDMs.forEach(d => renderChannelItem(d, "👤"));
+      renderSectionHeader(`私信好友 (${matchedDMs.length})`);
+      matchedDMs.forEach(d => renderChannelItem(d, "dm"));
     }
     return;
   }
 
-  // 2. TAB VIEW (Normal browsing)
-  if (state.currentTab === "pinned") {
-    if (state.pinned.length === 0) {
-      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">暂无关注，轻触右上角“关注”添加常用群聊或频道</div>`;
-      return;
-    }
-    renderSectionHeader(`常用工作空间 (${state.pinned.length})`);
-    state.pinned.forEach(p => renderChannelItem(p, p.icon || "#", true));
-  } 
-  else if (state.currentTab === "dms") {
-    // Top Section: Multi-person Group DMs
-    if (state.groups.length > 0) {
-      renderSectionHeader(`👥 多人群聊 (${state.groups.length})`);
-      state.groups.forEach(g => renderChannelItem(g, "👥"));
-    }
-
-    // Bottom Section: 1-on-1 DMs
-    if (state.dms.length > 0) {
-      renderSectionHeader(`👤 私信会话 (${state.dms.length})`);
-      state.dms.forEach(d => renderChannelItem(d, "👤"));
-    }
-
-    if (state.groups.length === 0 && state.dms.length === 0) {
-      channelList.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:12px;text-align:center;">暂无私聊或群聊</div>`;
-    }
-  } 
-  else {
-    // Specific Server Channels
-    const serverId = serverSelect.value;
-    if (!state.channelsCache[serverId]) {
-      channelList.innerHTML = `<div style="padding:12px;color:var(--text-muted);font-size:12px;">⏳ 加载频道中...</div>`;
-      const res = await callNative("fetchGuildChannels", { guildId: serverId });
-      state.channelsCache[serverId] = (res.channels || [])
-        .filter(c => c.type === 0 || c.type === 5)
-        .map(c => ({ id: c.id, name: `# ${c.name}`, server: serverSelect.options[serverSelect.selectedIndex]?.text || "", type: c.type }));
-    }
-    const items = state.channelsCache[serverId] || [];
-    renderSectionHeader(`文字频道 (${items.length})`);
-    items.forEach(c => renderChannelItem(c, "#", true));
+  // 2. SECTION VIEW (normal browsing): three collapsible sections in one scrolling list
+  // 常用关注: pinned items with their active threads, server tag on the right
+  const pinnedBody = renderSection("pinned", "常用关注", state.pinned.length);
+  if (state.pinned.length === 0) {
+    pinnedBody.innerHTML = `<div class="state-empty">还没有关注。点击右上角的星标，把常用频道加进来</div>`;
+  } else {
+    state.pinned.forEach(p => renderChannelItem(p, p.icon || "channel", true, true, pinnedBody));
   }
+
+  // 群聊与私信: group DMs first, then 1-on-1 DMs (both already sorted by activity)
+  const dmsBody = renderSection("dms", "群聊与私信", state.groups.length + state.dms.length);
+  if (state.groups.length === 0 && state.dms.length === 0) {
+    dmsBody.innerHTML = `<div class="state-empty">暂无群聊或私信</div>`;
+  } else {
+    state.groups.forEach(g => renderChannelItem(g, "group", false, false, dmsBody));
+    state.dms.forEach(d => renderChannelItem(d, "dm", false, false, dmsBody));
+  }
+
+  // 服务器: the picker is the first row, then the selected server's text channels (hidden when there are no servers)
+  if (state.servers.length > 0) {
+    const serverId = serverSelect.value;
+    let items = state.channelsCache[serverId];
+    const serversBody = renderSection("servers", "服务器", items ? items.length : null);
+
+    const pickerRow = document.createElement("div");
+    pickerRow.className = "server-picker";
+    pickerRow.appendChild(serverSelect);
+    serversBody.appendChild(pickerRow);
+    if (pickerHadFocus) serverSelect.focus();
+
+    if (!items) {
+      const loadingRow = document.createElement("div");
+      loadingRow.className = "state-empty";
+      loadingRow.innerText = "正在载入频道…";
+      serversBody.appendChild(loadingRow);
+      channelList.scrollTop = keepScroll;
+
+      items = await ensureServerChannels(serverId);
+      if (renderId !== channelListRenderSeq) return; // a newer render owns the list now
+      loadingRow.remove();
+      const badge = serversBody.previousElementSibling.querySelector(".channel-badge");
+      if (badge) {
+        badge.textContent = items.length;
+        badge.hidden = false;
+      }
+    }
+
+    if (items.length === 0) {
+      const emptyRow = document.createElement("div");
+      emptyRow.className = "state-empty";
+      emptyRow.innerText = "这个服务器没有可见的文字频道";
+      serversBody.appendChild(emptyRow);
+    }
+    items.forEach(c => renderChannelItem(c, "channel", true, false, serversBody));
+  }
+
+  channelList.scrollTop = keepScroll;
+}
+
+// One collapsible sidebar section: a header button (chevron, label, count) plus the body that holds its rows.
+// Returns the body element. A null count hides the badge (the server's channels are still loading).
+function renderSection(key, label, count) {
+  const collapsed = state.ui.collapsed.includes(key);
+  const section = document.createElement("div");
+  section.className = "sidebar-section";
+  section.innerHTML = `
+    <button type="button" class="section-toggle" data-section="${key}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="sectionBody-${key}">
+      <span class="section-chevron">${iconSVG("chevronDown", 12)}</span>
+      <span class="section-label">${escapeHTML(label)}</span>
+      <span class="channel-badge"${count === null ? " hidden" : ""}>${count === null ? "" : Number(count)}</span>
+    </button>
+    <div class="section-body" id="sectionBody-${key}"${collapsed ? " hidden" : ""}></div>
+  `;
+  channelList.appendChild(section);
+  return section.querySelector(".section-body");
 }
 
 function renderSectionHeader(text) {
@@ -354,28 +609,33 @@ function renderSectionHeader(text) {
   channelList.appendChild(headerDiv);
 }
 
-function renderChannelItem(item, icon, allowThreads = false) {
+// `icon` is an icon name ("channel" | "group" | "dm" | "thread"); item.icon (new name or legacy glyph) wins when present.
+// `allowThreads` nests the channel's active threads under the row, `showServerTag` adds the server label on the right,
+// `container` is the element the rows go into (a section body, or the list itself for search results).
+function renderChannelItem(item, icon, allowThreads = false, showServerTag = true, container = channelList) {
   const isChannelActive = state.activeChannel.id === item.id;
-  const cleanDisplayName = item.name.replace(/^[#⭐👥👤\s]+/, "");
+  const cleanDisplayName = item.name.replace(/^[#⭐👥👤🧵\s]+/u, "");
+  const isLegacyThreadName = /^\s*\u{1F9F5}/u.test(item.name);
+  const iconName = isLegacyThreadName ? "thread" : legacyIconName(item.icon || icon);
   const div = document.createElement("div");
-  div.className = `channel-item ${isChannelActive ? "active" : ""}`;
+  div.className = `channel-item ${isChannelActive ? "active" : ""}${item.subtitle ? " has-subtitle" : ""}`;
 
   let badgeHTML = "";
   if (item.type === 3 && item.memberCount) {
-    badgeHTML = `<span class="channel-badge">${item.memberCount}人</span>`;
-  } else if (item.server && state.currentTab !== "servers") {
-    badgeHTML = `<span class="server-tag">${escapeHTML(item.server)}</span>`;
+    badgeHTML = `<span class="channel-badge">${escapeHTML(item.memberCount)}人</span>`;
+  } else if (item.server && showServerTag) {
+    badgeHTML = `<span class="server-tag">${escapeHTML(cleanServerName(item.server))}</span>`;
   }
 
   let subtitleHTML = "";
   if (item.subtitle) {
-    subtitleHTML = `<div class="channel-subtitle" title="${escapeAttr(item.subtitle)}">${escapeHTML(item.subtitle)}</div>`;
+    subtitleHTML = `<div class="channel-subtitle" title="${escapeHTML(item.subtitle)}">${escapeHTML(item.subtitle)}</div>`;
   }
 
   div.innerHTML = `
-    <span class="channel-icon">${item.icon || icon || "#"}</span>
+    <span class="channel-icon">${iconSVG(iconName)}</span>
     <div class="channel-text-group">
-      <div class="channel-name" title="${escapeAttr(cleanDisplayName)}">${escapeHTML(cleanDisplayName)}</div>
+      <div class="channel-name" title="${escapeHTML(cleanDisplayName)}">${escapeHTML(cleanDisplayName)}</div>
       ${subtitleHTML}
     </div>
     ${badgeHTML}
@@ -385,7 +645,7 @@ function renderChannelItem(item, icon, allowThreads = false) {
     state.parentChannel = null;
     switchChannel(item);
   });
-  channelList.appendChild(div);
+  container.appendChild(div);
 
   // Active Threads if in channel
   if (allowThreads) {
@@ -395,14 +655,14 @@ function renderChannelItem(item, icon, allowThreads = false) {
       const tDiv = document.createElement("div");
       tDiv.className = `thread-subitem ${isThreadActive ? "active" : ""}`;
       tDiv.innerHTML = `
-        <span class="thread-sub-icon">↳ 🧵</span>
-        <span class="thread-sub-name" title="${escapeAttr(t.name)}">${escapeHTML(t.name)}</span>
+        <span class="thread-sub-icon">${iconSVG("thread", 14)}</span>
+        <span class="thread-sub-name" title="${escapeHTML(t.name)}">${escapeHTML(t.name)}</span>
       `;
       tDiv.addEventListener("click", (e) => {
         e.stopPropagation();
         openThread(t.id, t.name, t.messageCount, item);
       });
-      channelList.appendChild(tDiv);
+      container.appendChild(tDiv);
     });
   }
 }
@@ -410,10 +670,11 @@ function renderChannelItem(item, icon, allowThreads = false) {
 function switchChannel(channel) {
   state.parentChannel = null;
   state.activeChannel = channel;
+  revealActiveChannel();
   updateHeader();
   renderChannelList();
-  const icon = channel.type === 3 ? "👥 " : (channel.type === 1 ? "👤 " : "# ");
-  messagesList.innerHTML = `<div style="padding:30px;color:var(--text-muted);text-align:center;">⏳ 正在载入 ${icon}${escapeHTML(channel.name.replace(/^[#⭐👥👤\s]+/, ""))}...</div>`;
+  const namePrefix = (channel.type === 3 || channel.type === 1) ? "" : "#";
+  messagesList.innerHTML = `<div class="state-empty">正在载入 ${namePrefix}${escapeHTML(channel.name.replace(/^[#⭐👥👤🧵\s]+/u, ""))}…</div>`;
   state.lastMessageId = null;
   state.messages = [];
   notifyTouchBar();
@@ -430,14 +691,15 @@ window.openThread = function(threadId, threadName, replyCount, optParent) {
 
   state.activeChannel = {
     id: threadId,
-    name: `🧵 ${threadName}`,
+    name: threadName,
     server: state.parentChannel ? state.parentChannel.name : "",
     isThread: true
   };
 
+  revealActiveChannel();
   updateHeader();
   renderChannelList();
-  messagesList.innerHTML = `<div style="padding:30px;color:var(--text-muted);text-align:center;">⏳ 正在载入线程【${escapeHTML(threadName)}】...</div>`;
+  messagesList.innerHTML = `<div class="state-empty">正在载入线程【${escapeHTML(threadName)}】…</div>`;
   state.lastMessageId = null;
   state.messages = [];
   notifyTouchBar();
@@ -460,37 +722,46 @@ function updateHeader() {
   if (isThread) {
     if (threadBackBtn) {
       threadBackBtn.style.display = "inline-flex";
-      const cleanParentName = state.parentChannel.name.replace(/^[#⭐👥👤🧵\s]+/, "");
+      const cleanParentName = state.parentChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, "");
       document.getElementById("threadBackText").innerText = `#${cleanParentName}`;
     }
-    if (channelHash) channelHash.innerText = "🧵";
-    const cleanTitle = state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/, "");
+    if (channelHash) channelHash.innerHTML = iconSVG("thread");
+    const cleanTitle = state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, "");
     activeChannelTitle.innerText = cleanTitle;
-    activeChannelServer.innerText = `子线程 · 来自 #${state.parentChannel.name.replace(/^[#⭐👥👤🧵\s]+/, "")}`;
-    messageInput.placeholder = `在线程【${cleanTitle}】中发言... (@ 唤起机器人，回车发送)`;
+    activeChannelServer.innerText = `子线程 · 来自 #${state.parentChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, "")}`;
+    messageInput.placeholder = "在线程中回复…";
   } else if (isGroup) {
     if (threadBackBtn) threadBackBtn.style.display = "none";
-    if (channelHash) channelHash.innerText = "👥";
+    if (channelHash) channelHash.innerHTML = iconSVG("group");
     activeChannelTitle.innerText = state.activeChannel.name;
     activeChannelServer.innerText = state.activeChannel.subtitle || "多人群聊";
-    messageInput.placeholder = `在群聊【${state.activeChannel.name}】中发言... (@ 唤起群成员，回车发送)`;
+    messageInput.placeholder = "在群聊中发言，@ 唤起成员";
   } else if (isDM) {
     if (threadBackBtn) threadBackBtn.style.display = "none";
-    if (channelHash) channelHash.innerText = "👤";
+    if (channelHash) channelHash.innerHTML = iconSVG("dm");
     activeChannelTitle.innerText = state.activeChannel.name;
     activeChannelServer.innerText = state.activeChannel.subtitle || "私信会话";
-    messageInput.placeholder = `发送私信给 ${state.activeChannel.name}... (回车发送)`;
+    messageInput.placeholder = `发送私信给 ${state.activeChannel.name}`;
   } else {
     if (threadBackBtn) threadBackBtn.style.display = "none";
-    if (channelHash) channelHash.innerText = "#";
-    const cleanTitle = state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/, "");
+    if (channelHash) channelHash.innerHTML = iconSVG("channel");
+    const cleanTitle = state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, "");
     activeChannelTitle.innerText = cleanTitle;
-    activeChannelServer.innerText = state.activeChannel.server || "";
-    messageInput.placeholder = `发送消息到 #${cleanTitle}... (@ 唤起机器人，回车发送)`;
+    activeChannelServer.innerText = cleanServerName(state.activeChannel.server);
+    messageInput.placeholder = `给 #${cleanTitle} 发消息，@ 唤起智能体`;
   }
 
+  // Hide the title / server divider when there is no server label (class toggle, so the CSS needs no relational selector)
+  const chatHeader = activeChannelServer.closest(".chat-header");
+  if (chatHeader) chatHeader.classList.toggle("no-server", !activeChannelServer.textContent.trim());
+
   const isPinned = state.pinned.some(p => p.id === state.activeChannel.id);
-  pinToggleBtn.innerText = isPinned ? "★ 已关注" : "☆ 关注";
+  const pinLabel = isPinned ? "已关注" : "关注";
+  pinToggleBtn.innerHTML = iconSVG(isPinned ? "starFilled" : "star");
+  pinToggleBtn.classList.toggle("pinned", isPinned);
+  pinToggleBtn.title = pinLabel;
+  pinToggleBtn.setAttribute("aria-label", pinLabel);
+  pinToggleBtn.setAttribute("aria-pressed", isPinned ? "true" : "false");
 
   updateAgentChips();
 }
@@ -511,8 +782,9 @@ function updateAgentChips() {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "agent-chip";
+    const isBot = isBotId(item.id);
     chip.innerHTML = `
-      <span class="agent-chip-dot"></span>
+      <span class="agent-chip-avatar ${isBot ? 'bot' : ''}" style="${avatarStyle(item.id, isBot)}">${escapeHTML(((item.name || "")[0] || "U").toUpperCase())}</span>
       <span>@${escapeHTML(item.name)}</span>
     `;
     chip.addEventListener("click", () => {
@@ -596,13 +868,13 @@ async function togglePinCurrentChannel() {
       id: state.activeChannel.id,
       name: state.activeChannel.name,
       server: state.activeChannel.server || (isGroup ? "多人群聊" : (isDM ? "私信" : "")),
-      icon: isGroup ? "👥" : (isDM ? "👤" : "#"),
+      icon: isGroup ? "group" : (isDM ? "dm" : (state.activeChannel.isThread ? "thread" : "channel")),
       type: state.activeChannel.type,
       subtitle: state.activeChannel.subtitle
     });
   }
   updateHeader();
-  if (state.currentTab === "pinned") renderChannelList();
+  renderChannelList();
   await callNative("saveConfig", { pinned_channels: state.pinned });
 }
 
@@ -653,7 +925,7 @@ async function loadServersAndDMs() {
         name: title,
         rawName: d.name || "",
         type: d.type,
-        icon: isGroup ? "👥" : "👤",
+        icon: isGroup ? "group" : "dm",
         lastMessageId: d.last_message_id || "",
         recipients: recips,
         memberNames: memberNames,
@@ -680,22 +952,12 @@ async function loadServersAndDMs() {
     state.servers.forEach(g => {
       const opt = document.createElement("option");
       opt.value = g.id;
-      opt.innerText = (g.owner ? "👑 " : "📁 ") + g.name;
+      opt.innerText = g.name;
       serverSelect.appendChild(opt);
     });
 
-    // Background pre-cache channels for servers for instant global search
-    for (const g of state.servers.slice(0, 6)) {
-      if (!state.channelsCache[g.id]) {
-        callNative("fetchGuildChannels", { guildId: g.id }).then(res => {
-          if (res && res.channels) {
-            state.channelsCache[g.id] = res.channels
-              .filter(c => c.type === 0 || c.type === 5)
-              .map(c => ({ id: c.id, name: `# ${c.name}`, server: g.name, type: c.type }));
-          }
-        });
-      }
-    }
+    // Background pre-cache channels for the first servers for instant global search
+    state.servers.slice(0, 6).forEach(g => { ensureServerChannels(g.id); });
   }
 }
 
@@ -704,8 +966,9 @@ function setStatus(text, type = "green") {
   const textEl = statusIndicator.querySelector(".status-text");
   const dotEl = statusIndicator.querySelector(".status-dot");
   if (textEl) textEl.innerText = text;
+  statusIndicator.title = text;
   if (dotEl) {
-    dotEl.style.backgroundColor = type === "amber" ? "var(--status-amber)" : (type === "red" ? "var(--btn-danger)" : "var(--status-green)");
+    dotEl.style.backgroundColor = type === "amber" ? "var(--warn)" : (type === "red" ? "var(--danger)" : "var(--ok)");
   }
 }
 
@@ -714,7 +977,7 @@ async function loadMessages() {
   if (!state.activeChannel.id) return;
   const res = await callNative("fetchMessages", { channelId: state.activeChannel.id, limit: 40 });
   if (res && res.messages) {
-    setStatus("连接正常 · 0% CPU", "green");
+    setStatus("已连接", "green");
     renderMessages(res.messages);
   } else {
     setStatus("加载失败", "red");
@@ -734,7 +997,7 @@ async function pollMessages() {
 
 function renderMessages(messages) {
   if (!messages || messages.length === 0) {
-    messagesList.innerHTML = `<div style="padding:40px;color:var(--text-muted);text-align:center;font-size:13px;">暂无历史消息</div>`;
+    messagesList.innerHTML = `<div class="state-empty">暂无历史消息</div>`;
     return;
   }
   state.lastMessageId = messages[0].id;
@@ -812,22 +1075,45 @@ function renderMessages(messages) {
 
 function createMessageHTML(m, isFollowUp) {
   const authorKnown = m.author ? (KNOWN_BOTS[m.author.id] || state.knownUsers[m.author.id]) : null;
-  const authorName = escapeHTML(authorKnown ? authorKnown.name : (m.author ? (m.author.global_name || m.author.username) : "Unknown"));
+  const rawAuthorName = String((authorKnown ? authorKnown.name : (m.author ? (m.author.global_name || m.author.username) : "")) || "Unknown");
+  const authorName = escapeHTML(rawAuthorName);
   const isBot = !!(m.author && (m.author.bot || KNOWN_BOTS[m.author.id]));
   const isMe = !!(m.author && state.currentUser && m.author.id === state.currentUser.id);
-  const avatarLetter = (authorName[0] || "U").toUpperCase();
-  const timeStr = m.timestamp ? m.timestamp.substr(11, 5) : "";
+  const avatarLetter = escapeHTML((Array.from(rawAuthorName)[0] || "U").toUpperCase());
+  const timeStr = m.timestamp ? fmtTime(m.timestamp) : "";
 
   // Parse markdown
   const formattedContent = parseMarkdown(m.content || "");
 
   // Parse True Discord Interaction Component Buttons
-  let componentsHTML = "";
+  let buttonsHTML = "";
+  let buttonCount = 0;
+  let disabledCount = 0;
+  let linkCount = 0;
+  const buttonIds = [];
+  const buttons = [];
   if (m.components && m.components.length > 0) {
-    componentsHTML = `<div class="components-row">`;
     m.components.forEach(row => {
       if (row.components) {
         row.components.forEach(btn => {
+          // Link button (style 5): carries a url and no custom_id. It is a plain link (opened in the system browser by
+          // the native navigation policy), never an interaction: no data-act, and it is left out of the approval counts.
+          if (btn.style === 5) {
+            const url = String(btn.url || "");
+            linkCount++;
+            if (!btn.disabled && /^https?:\/\/[^\s/]\S*$/i.test(url)) {
+              buttonsHTML += `
+                <a class="btn-component style-link" href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(btn.label)}${iconSVG("external", 13)}</a>
+              `;
+            } else {
+              // Anything that is not http(s) (or a link the bot disabled) gets no href at all
+              buttonsHTML += `
+                <button type="button" class="btn-component style-link disabled" disabled>${escapeHTML(btn.label)}</button>
+              `;
+            }
+            return;
+          }
+
           let styleClass = "style-secondary";
           if (btn.style === 3) styleClass = "style-success"; // Green (Allow Once)
           if (btn.style === 4) styleClass = "style-danger";  // Red (Deny)
@@ -835,33 +1121,75 @@ function createMessageHTML(m, isFollowUp) {
 
           const isDisabled = !!btn.disabled;
           const appId = m.application_id || (m.author ? m.author.id : '');
-          componentsHTML += `
-            <button class="btn-component ${styleClass} ${isDisabled ? 'disabled' : ''}" 
+          buttonCount++;
+          if (isDisabled) disabledCount++;
+          buttonIds.push(String(btn.custom_id == null ? "" : btn.custom_id));
+          buttons.push(btn);
+          // The click is routed by the delegated listener on #messagesList (see bindEvents); ids and labels travel as data-* only
+          buttonsHTML += `
+            <button type="button" class="btn-component ${styleClass} ${isDisabled ? 'disabled' : ''}"
                     ${isDisabled ? 'disabled' : ''}
-                    onclick="handleComponentClick('${appId}', '${m.id}', '${btn.custom_id}', '${escapeHTML(btn.label)}', this)">
+                    data-act="component" data-app="${escapeHTML(appId)}" data-msg="${escapeHTML(m.id)}"
+                    data-custom="${escapeHTML(btn.custom_id)}" data-label="${escapeHTML(btn.label)}">
               ${escapeHTML(btn.label)}
             </button>
           `;
         });
       }
     });
-    componentsHTML += `</div>`;
+  }
+
+  // Approval Card: a message whose buttons read like an approve / deny prompt renders as one card (head / body / actions)
+  let bodyHTML = `<div class="message-content">${formattedContent}</div>`;
+  // An approval answered in this session stays resolved, unless the bot has since swapped in a fresh set of live buttons
+  // (only clicks made on an approval card are recorded, see handleComponentClick)
+  const answered = state.resolvedInteractions[m.id];
+  const resolved = (answered && (disabledCount === buttonCount || buttonIds.includes(answered.customId))) ? answered : null;
+  if (buttonCount + linkCount > 0 && !resolved && !isApprovalPrompt(buttons)) {
+    // Any other component buttons (pagination, menus, link buttons): plain row under the content, always live
+    bodyHTML += `<div class="components-row">${buttonsHTML}</div>`;
+  } else if (buttonCount > 0 || resolved) {
+    let stateKey = "pending";
+    let stateText = "等待确认";
+    let actionsHTML = buttonsHTML;
+    if (resolved) {
+      const verdict = interactionVerdict(resolved.label);
+      stateKey = verdict.key;
+      stateText = verdict.text;
+      actionsHTML = approvalResultHTML(resolved);
+    } else if (disabledCount === buttonCount) {
+      // The bot edited the message and disabled every button
+      stateKey = "expired";
+      stateText = "已处理";
+    }
+    bodyHTML = `
+      <div class="approval-card" data-message-id="${escapeHTML(m.id)}" data-state="${stateKey}">
+        <div class="approval-head">
+          <span class="approval-icon">${iconSVG("shield")}</span>
+          <span class="approval-title">${authorName} 请求确认</span>
+          <span class="approval-state state-${stateKey}">${escapeHTML(stateText)}</span>
+        </div>
+        <div class="approval-body">${formattedContent}</div>
+        <div class="approval-actions ${resolved ? 'resolved' : ''}">${actionsHTML}</div>
+      </div>
+    `;
   }
 
   // Parse Thread Card
   let threadHTML = "";
   if (m.thread) {
     const threadName = escapeHTML(m.thread.name || "查看线程");
-    const count = m.thread.message_count || 0;
+    const count = Number(m.thread.message_count) || 0;
     threadHTML = `
-      <div class="message-thread-card" onclick="openThread('${m.thread.id}', '${escapeAttr(m.thread.name || '线程')}', ${count})">
-        <div class="thread-card-left">
-          <svg class="thread-card-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+      <button type="button" class="message-thread-card" data-act="thread" data-thread-id="${escapeHTML(m.thread.id)}"
+              data-thread-name="${escapeHTML(m.thread.name || "线程")}" data-count="${count}">
+        <span class="thread-card-left">
+          <span class="thread-card-icon">${iconSVG("thread")}</span>
           <span class="thread-card-name">${threadName}</span>
           <span class="thread-card-count">${count} 条回复</span>
-        </div>
-        <div class="thread-card-arrow">进入线程 ›</div>
-      </div>
+        </span>
+        <span class="thread-card-arrow">${iconSVG("chevronRight")}</span>
+      </button>
     `;
   }
 
@@ -871,8 +1199,7 @@ function createMessageHTML(m, isFollowUp) {
       <div class="message-row follow-up">
         <span class="follow-up-time">${timeStr}</span>
         <div class="message-body">
-          <div class="message-content">${formattedContent}</div>
-          ${componentsHTML}
+          ${bodyHTML}
           ${threadHTML}
         </div>
       </div>
@@ -882,15 +1209,14 @@ function createMessageHTML(m, isFollowUp) {
   // Full message row with avatar
   return `
     <div class="message-row">
-      <div class="message-avatar ${isBot ? 'bot' : ''}">${avatarLetter}</div>
+      <div class="message-avatar ${isBot ? 'bot' : ''}" style="${avatarStyle(m.author ? m.author.id : '', isBot)}">${avatarLetter}</div>
       <div class="message-body">
         <div class="message-meta">
           <span class="author-name ${isMe ? 'is-me' : ''}">${authorName}</span>
-          ${isBot ? '<span class="bot-tag">BOT</span>' : ''}
+          ${isBot ? '<span class="bot-tag">智能体</span>' : ''}
           <span class="message-time">${timeStr}</span>
         </div>
-        <div class="message-content">${formattedContent}</div>
-        ${componentsHTML}
+        ${bodyHTML}
         ${threadHTML}
       </div>
     </div>
@@ -898,50 +1224,79 @@ function createMessageHTML(m, isFollowUp) {
 }
 
 // Markdown Parser
+// Security: the raw text is HTML-escaped FIRST and every later step works on the escaped string, so message content
+// can never introduce markup. Each piece of generated HTML (code, mentions, links) is parked behind a NUL-delimited
+// placeholder until the end, so later rules cannot rewrite the inside of a tag that an earlier rule produced.
 function parseMarkdown(text) {
   if (!text) return "";
 
-  // Terminal & Code blocks
+  const stash = [];
+  const hold = (html) => {
+    stash.push(html);
+    return `\u0000${stash.length - 1}\u0000`;
+  };
+
+  // NUL is the placeholder delimiter: it is dropped from everything that comes from outside (the message text and
+  // the display names pulled in for mentions) before escaping, so a placeholder can only ever be one made by hold()
+  const esc = (value) => escapeHTML(String(value == null ? "" : value).replace(/\u0000/g, ""));
+  text = esc(text);
+
+  // Terminal & Code blocks (the captured code is already escaped)
   text = text.replace(/```([a-zA-Z0-9_-]*)[ \t]*\r?\n?([\s\S]*?)```/g, (match, lang, code) => {
-    const langLabel = lang ? lang.toUpperCase() : "TERMINAL";
-    return `
-      <div class="terminal-block-wrapper">
-        <div class="terminal-header">
-          <div class="terminal-dots">
-            <span class="terminal-dot"></span>
-            <span class="terminal-dot"></span>
-            <span class="terminal-dot"></span>
-          </div>
-          <span class="terminal-lang">${escapeHTML(langLabel)}</span>
-          <button class="btn-copy" onclick="copyCode(this)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-            <span>复制</span>
-          </button>
-        </div>
-        <pre class="code-block"><code>${escapeHTML(code.trim())}</code></pre>
-      </div>
-    `;
+    const langLabel = lang ? lang.toLowerCase() : "shell";
+    return hold(`<div class="terminal-block-wrapper">` +
+      `<div class="terminal-header">` +
+        `<span class="terminal-lang">${langLabel}</span>` +
+        `<button type="button" class="btn-copy" data-act="copy">${iconSVG("copy", 13)}<span>复制</span></button>` +
+      `</div>` +
+      `<pre class="code-block"><code>${code.trim()}</code></pre>` +
+    `</div>`);
   });
 
   // Inline code: `code`
-  text = text.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+  text = text.replace(/`([^`]+)`/g, (match, code) => hold(`<code class="inline-code">${code}</code>`));
 
-  // Role mentions: <@&123456789>
-  text = text.replace(/<@&(\d+)>/g, (match, id) => {
-    const roleName = KNOWN_ROLES[id] || "Role";
-    return `<span class="mention-pill role-pill" title="Role ID: ${id}" onclick="insertMentionFromTouchBar('${escapeAttr(roleName)}')">@${escapeHTML(roleName)}</span>`;
+  // Role mentions: <@&123456789> (escaped form: &lt;@&amp;123456789&gt;)
+  text = text.replace(/&lt;@&amp;(\d+)&gt;/g, (match, id) => {
+    const roleName = esc(KNOWN_ROLES[id] || "Role");
+    return hold(`<span class="mention-pill role-pill" title="Role ID: ${id}" data-act="mention" data-name="${roleName}">@${roleName}</span>`);
   });
 
   // User / Bot Mentions: <@123456789> or <@!123456789>
-  text = text.replace(/<@!?(\d+)>/g, (match, id) => {
+  text = text.replace(/&lt;@!?(\d+)&gt;/g, (match, id) => {
     const user = KNOWN_BOTS[id] || state.knownUsers[id];
-    const name = user ? user.name : id;
-    return `<span class="mention-pill" title="ID: ${id}" onclick="insertMentionFromTouchBar('${escapeAttr(name)}')">@${escapeHTML(name)}</span>`;
+    const name = esc(user ? user.name : id);
+    return hold(`<span class="mention-pill" title="ID: ${id}" data-act="mention" data-name="${name}">@${name}</span>`);
   });
 
   // Channel Mentions: <#123456789>
-  text = text.replace(/<#(\d+)>/g, (match, id) => {
-    return `<span class="mention-pill channel-pill" onclick="switchChannelById('${id}')">#${id}</span>`;
+  text = text.replace(/&lt;#(\d+)&gt;/g, (match, id) => {
+    return hold(`<span class="mention-pill channel-pill" data-act="channel" data-id="${id}">#${id}</span>`);
+  });
+
+  // Autolink: http(s) URLs only. The URL is already-escaped text, so it is safe both as href and as link text.
+  // "&amp;" may appear inside a URL; any other entity (an escaped quote or angle bracket) ends it.
+  text = text.replace(/https?:\/\/(?:[^\s<&\u0000]|&amp;)+/g, (match) => {
+    let url = match;
+    let tail = "";
+    // Trailing sentence punctuation (and a closing ** of bold) belongs to the prose, not the link;
+    // a closing paren stays when the URL opened one
+    for (;;) {
+      if (url.endsWith("&amp;")) {
+        url = url.slice(0, -5);
+        tail = "&amp;" + tail;
+        continue;
+      }
+      const last = url[url.length - 1];
+      if (".,;:!?*".includes(last) || (last === ")" && !url.includes("("))) {
+        url = url.slice(0, -1);
+        tail = last + tail;
+        continue;
+      }
+      break;
+    }
+    if (!/^https?:\/\/[^/]/.test(url)) return match;
+    return hold(`<a class="msg-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`) + tail;
   });
 
   // Bold: **text**
@@ -950,7 +1305,13 @@ function parseMarkdown(text) {
   // Newlines to <br>
   text = text.replace(/\n/g, '<br>');
 
-  return text;
+  // Put the parked HTML back. An inline-code span may itself hold an earlier code-block placeholder, hence the
+  // recursion; a parked piece may only refer to pieces parked before it, which also guarantees termination.
+  const restore = (html, limit) => html.replace(/\u0000(\d+)\u0000/g, (match, index) => {
+    const i = Number(index);
+    return i < limit ? restore(stash[i], i) : "";
+  });
+  return restore(text, stash.length);
 }
 
 // Copy Code Block
@@ -984,14 +1345,56 @@ function fallbackCopy(text) {
   document.body.removeChild(ta);
 }
 
+// Approval Card State: which chip an answered approval gets, derived from the clicked button's label
+// Only button sets that read like an approve / deny prompt get the approval card; everything else stays a plain button row
+function isApprovalPrompt(buttons) {
+  return (buttons || []).some(b => /允许|拒绝|不允许|确认|取消|allow|deny|approve|reject|confirm|cancel/i.test(String((b && b.label) || "")));
+}
+
+function isDenyLabel(label) {
+  return /拒绝|不允许|取消|deny|reject|cancel|don.?t\s*allow/i.test(String(label || ""));
+}
+
+function interactionVerdict(label) {
+  const text = String(label || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+  if (isDenyLabel(text)) return { key: "denied", text: "已拒绝" };
+  if (/^(?:always\s+)?allow|^(?:始终|总是)?允许/i.test(text)) {
+    const gap = /^[\x00-\x7F]/.test(text) ? " " : "";
+    return { key: "approved", text: `已${gap}${text}` };
+  }
+  return { key: "expired", text: "已处理" };
+}
+
+function approvalResultHTML(resolved) {
+  const icon = isDenyLabel(resolved.label) ? "x" : "check";
+  return `<div class="approval-result">${iconSVG(icon, 14)}<span>${escapeHTML(resolved.label)} · ${fmtTime(resolved.time)}</span></div>`;
+}
+
+function applyResolvedState(card, resolved) {
+  const verdict = interactionVerdict(resolved.label);
+  card.dataset.state = verdict.key;
+  const chip = card.querySelector(".approval-state");
+  if (chip) {
+    chip.className = `approval-state state-${verdict.key}`;
+    chip.textContent = verdict.text;
+  }
+  const actions = card.querySelector(".approval-actions");
+  if (actions) {
+    actions.classList.add("resolved");
+    actions.innerHTML = approvalResultHTML(resolved);
+  }
+}
+
 // Component Click Handler
 window.handleComponentClick = async function(appId, messageId, customId, label, btnEl) {
   if (btnEl && (btnEl.disabled || btnEl.classList.contains("disabled"))) {
-    setStatus("该授权已失效或超时", "amber");
+    setStatus("该按钮已失效或超时", "amber");
     return;
   }
 
-  setStatus(`正在授权: ${label}...`, "amber");
+  // Read before the await: a poll may re-render the list and detach the button while the request is in flight
+  const fromApproval = !!(btnEl && btnEl.closest(".approval-card"));
+  setStatus(`正在发送: ${label}…`, "amber");
   if (btnEl) btnEl.disabled = true;
 
   const res = await callNative("sendInteraction", {
@@ -1002,11 +1405,20 @@ window.handleComponentClick = async function(appId, messageId, customId, label, 
   });
 
   if (res && res.success) {
-    setStatus(`已成功授权: ${label}`, "green");
+    if (fromApproval) {
+      setStatus(isDenyLabel(label) ? `已拒绝: ${label}` : `已授权: ${label}`, "green");
+      state.resolvedInteractions[messageId] = { label, time: new Date(), customId: String(customId) };
+      const card = (btnEl && btnEl.isConnected && btnEl.closest(".approval-card")) ||
+                   messagesList.querySelector(`.approval-card[data-message-id="${CSS.escape(String(messageId))}"]`);
+      if (card) applyResolvedState(card, state.resolvedInteractions[messageId]);
+    } else {
+      // Plain component buttons keep the original behavior: no lockout, the reload below re-enables them
+      setStatus(`已发送: ${label}`, "green");
+    }
     setTimeout(loadMessages, 800);
   } else {
-    const errMsg = (res && res.error) ? res.error : "授权未通过或已过期";
-    setStatus(`授权失败: ${errMsg}`, "amber");
+    const errMsg = (res && res.error) ? res.error : "交互未被接受或已过期";
+    setStatus(`操作失败: ${errMsg}`, "amber");
     if (btnEl) btnEl.disabled = false;
   }
 };
@@ -1090,10 +1502,10 @@ function showMentionPopover(query) {
   mentionItems.innerHTML = filtered.map((u, i) => {
     const subText = u.role ? "身份组" : (u.rawUsername ? `@${u.rawUsername}` : `@${u.username}`);
     return `
-      <div class="mention-item ${i === 0 ? 'selected' : ''}" onclick="selectMention(${i})">
-        <div class="mention-item-avatar">${(u.name[0] || 'U').toUpperCase()}</div>
+      <div class="mention-item ${i === 0 ? 'selected' : ''}" data-index="${i}">
+        <div class="mention-item-avatar ${u.role ? 'role' : (u.bot ? 'bot' : '')}"${u.role ? '' : ` style="${avatarStyle(u.id, u.bot)}"`}>${escapeHTML((u.name[0] || 'U').toUpperCase())}</div>
         <div class="mention-item-name">${escapeHTML(u.name)}</div>
-        ${u.bot ? '<span class="bot-tag">BOT</span>' : ''}
+        ${u.bot ? '<span class="bot-tag">智能体</span>' : ''}
         <div class="mention-item-sub">${escapeHTML(subText)}</div>
       </div>
     `;
@@ -1200,7 +1612,7 @@ async function handleSendMessage() {
 
   sendBtn.disabled = false;
   if (res && res.success) {
-    setStatus("连接正常 · 0% CPU", "green");
+    setStatus("已连接", "green");
     loadMessages();
   } else {
     setStatus("发送失败", "red");
@@ -1213,7 +1625,7 @@ function notifyTouchBar() {
 
   callNative("updateTouchBar", {
     channelId: state.activeChannel.id,
-    channelName: state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/, ""),
+    channelName: state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, ""),
     bots: activeBots,
     pinned: state.pinned
   });
@@ -1265,6 +1677,13 @@ window.touchBarAction = function(action) {
 };
 
 // Utilities
+// Local wall-clock HH:MM for an ISO timestamp (or a Date)
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function escapeHTML(str) {
   return String(str || "").replace(/[&<>'"]/g, tag => ({
     "&": "&amp;",
@@ -1273,10 +1692,6 @@ function escapeHTML(str) {
     "'": "&#39;",
     '"': "&quot;"
   }[tag] || tag));
-}
-
-function escapeAttr(str) {
-  return String(str || "").replace(/"/g, "&quot;");
 }
 
 function escapeRegExp(str) {

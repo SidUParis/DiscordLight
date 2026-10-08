@@ -11,7 +11,7 @@
 - **🚀 原生极速，超低资源占用**
   - 内存常驻 **< 80 MB**（对比官方客户端动辄 1.5GB+）。
   - 空闲状态 CPU 占用稳定为 **0%**，极大延长 MacBook 续航，拒绝发热。
-  - 原生 macOS 深色黑曜石主题（Dark Aqua）。
+  - 原生 macOS 深色界面（Graphite Console）：单色描边图标、面向智能体的审批卡片。
 
 - **🎛 深度优化 Touch Bar**
   - **常驻 `@ 智能体` 抽屉（Popover）**：完美解决输入文字时拼音输入法候选栏挤占 Touch Bar 的难题。输入任何文字时，随时轻点 `@ 智能体` 展开频道内所有 Bot，点按即插入艾特并无缝恢复输入法候选。
@@ -80,7 +80,7 @@ DiscordLight/
 │   └── Info.plist           # macOS 应用元数据
 ├── web/
 │   ├── index.html           # 前端 DOM 结构
-│   ├── style.css            # 深色黑曜石主题样式表
+│   ├── style.css            # Graphite Console 主题样式表（原生 macOS 深色）
 │   └── app.js               # 客户端逻辑、真实组件交互与 @ 补全
 └── assets/
     ├── AppIcon.icns         # 原生圆角应用图标
