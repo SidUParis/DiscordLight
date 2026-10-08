@@ -72,6 +72,8 @@
 
       <!-- Message History -->
       <section class="messages-viewport" id="messagesViewport">
+        <!-- Scroll-back status (loading an older page, or the history cap); outside the list so re-renders keep it -->
+        <div class="state-empty history-status" id="historyStatus" role="status" hidden></div>
         <div class="messages-container" id="messagesList">
           <!-- Messages dynamically rendered here -->
         </div>
@@ -110,7 +112,7 @@
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/></svg>
       </div>
       <h2>连接到 Discord</h2>
-      <p class="setup-desc">轻量、极速、无 Electron 的原生 macOS Discord 客户端。所有凭据仅安全保存在本地 <code>~/.config/discordlight/config.json</code>，绝不上传第三方服务器。</p>
+      <p class="setup-desc">轻量、极速、无 Electron 的原生 macOS Discord 客户端。Token 只保存在本机的 macOS 钥匙串（Keychain）里，绝不上传第三方服务器。</p>
       <div class="setup-field">
         <label for="tokenInput">Discord User Token</label>
         <input type="password" id="tokenInput" placeholder="粘贴您的 Discord Token (例如: OTk...)" />

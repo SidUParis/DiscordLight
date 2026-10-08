@@ -14,6 +14,8 @@ const SUITES = [
   ["mentions", "run-mentions.cjs"],
   ["polling", "run-polling.cjs"],
   ["polling-edge", "run-polling-edge.cjs"],
+  ["notify", "run-notify.cjs"],
+  ["content", "run-content.cjs"],
   ["fuzz-markdown", "fuzz-markdown.cjs"]
 ];
 

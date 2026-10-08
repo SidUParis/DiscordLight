@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, package and publish
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # make build (universal), ad-hoc codesign, .zip via ditto, .dmg via hdiutil, SHA256SUMS.txt; see the script header
+      - name: Build and package
+        id: pkg
+        run: bash scripts/package.sh "${GITHUB_REF_NAME}"
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            **Install:** open the `.dmg` and drag DiscordLight to Applications (or unzip the `.zip`).
+            The app is ad-hoc signed and not notarized, so macOS blocks the first launch: on macOS 14 or earlier, right-click the app and choose Open; on macOS 15 or later, try to open it once, then click Open Anyway in System Settings > Privacy & Security. Or run `xattr -d com.apple.quarantine /Applications/DiscordLight.app`.
+            Check the download against `SHA256SUMS.txt` with `shasum -a 256 <file>`.
+
+            **Risk:** DiscordLight signs in with a Discord user token. Third-party clients and user tokens are against Discord's Terms of Service; use it at your own risk. Not affiliated with or endorsed by Discord Inc.
+          files: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.dmg }}
+            ${{ steps.pkg.outputs.sums }}
+          fail_on_unmatched_files: true

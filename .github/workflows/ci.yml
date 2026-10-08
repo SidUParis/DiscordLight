@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke tests (headless, mocked bridge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # tests/ has no lockfile yet: key the npm cache on package.json (playwright is pinned to an exact version there)
+          cache-dependency-path: tests/package.json
+
+      - name: Install test dependencies
+        # `npm ci` needs a package-lock.json; until one is committed it fails and `npm install` takes over
+        run: npm ci || npm install
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests (8 suites)
+        run: npm test
+
+      - name: Upload screenshots of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-shots
+          path: tests/smoke/.shots/
+          if-no-files-found: ignore
+
+  build:
+    name: Build (macOS)
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: make build
+        run: make build
+
+      - name: Inspect the bundle
+        run: ls -la DiscordLight.app/Contents/MacOS

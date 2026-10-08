@@ -1,6 +1,6 @@
 # DiscordLight 项目交接文档 (Handover Document)
 
-> **文档版本**: v1.1.0  
+> **文档版本**: v1.2.0  
 > **更新时间**: 2026-10-08  
 > **仓库地址**: [https://github.com/SidUParis/DiscordLight](https://github.com/SidUParis/DiscordLight)  
 > **作者/维护团队**: SidUParis & AI Pair Programming  
@@ -13,8 +13,8 @@
 - **传统客户端痛点**：官方 Discord 客户端基于 Electron 构建，常驻内存高达 800MB ~ 1.5GB，待机状态仍占用 5%~15% 的 CPU，MacBook 发热严重且电池消耗极快；对于深度使用 AI Agent / Bot 的开发者而言，界面充斥大量冗余社交功能，而针对 AI 交互的痛点（如 Touch Bar 艾特被输入法顶替、交互式按钮只发文字报错、线程管理混乱等）未能得到解决。
 - **项目定位**：面向 AI 开发者与 Agent 工作流的**超轻量、高性能、原生 macOS** 客户端。
 - **核心成果**：
-  - **内存常驻 < 80 MB**（仅为 Electron 版的 1/15）。
-  - **空闲 CPU 占用 0%**，纯本地直连，极佳电池续航。
+  - **实测内存约 120 MB**（宿主进程约 58 MB + WebKit 辅助进程约 60 MB；Intel MacBook Pro、macOS 15.8.1、v1.2.0、真实账号轮询 90 秒，见 5.2 的 `scripts/run-debug.command`）。
+  - **空闲 CPU 0.1–1.2%**（窗口可见、每 2.5 s 轮询；后台 15 s 一次），纯本地直连。
   - **原生 Touch Bar 深度定制**：采用 Popover 架构，彻底解决输入法候选词挤占 Touch Bar 的系统级冲突。
   - **真实的交互式组件响应**：完整支持 AI Bot 的 `Allow Session`、`Allow Once` 等组件交互（发送 Discord 原生 Interaction Payload，而非文字回退）。
   - **全局搜索与群聊分类**：支持秒级检索多人群聊、成员、频道与私信，`⌘K` 直达搜索。
@@ -44,7 +44,7 @@ DiscordLight/
 │   ├── build-and-run.command  # 双击即 make build && make install 并重启应用，见 5.2
 │   └── run-debug.command      # 前台运行已安装的 App 90 秒，采样 RSS/CPU，抓 stderr 与崩溃报告，见 5.2
 ├── src/
-│   ├── main.m               # Objective-C 原生宿主：窗口、WebKit Bridge、导航策略、TouchBar（ARC，见 3.7）
+│   ├── main.m               # Objective-C 原生宿主：窗口、WebKit Bridge、导航策略、TouchBar（ARC，见 3.7）、Keychain（见 3.10）、系统通知与 Dock 角标（见 3.11）
 │   └── Info.plist           # macOS Bundle 元数据 (BundleID, 权限, 架构等)
 ├── web/
 │   ├── index.html           # 前端 UI 骨架：侧栏（搜索 + 三个可折叠分组）、聊天区、输入框
@@ -57,7 +57,8 @@ DiscordLight/
         ├── run-all.cjs      # 依次运行全部套件（npm test / make test）
         ├── harness.cjs      # 公共部分：加载 Playwright、web 目录、PASS / FAIL 输出
         ├── mock-bridge.cjs  # 假 discordBridge 与固定数据
-        ├── run-ui.cjs  run-links.cjs  run-polling.cjs  run-polling-edge.cjs  fuzz-markdown.cjs
+        ├── run-ui.cjs  run-links.cjs  run-mentions.cjs  run-polling.cjs  run-polling-edge.cjs
+        ├── run-notify.cjs  run-content.cjs  fuzz-markdown.cjs
         └── .shots/          # 截图输出（gitignored）
 ```
 
@@ -69,7 +70,7 @@ DiscordLight/
 | **本地用户配置** | `~/.config/discordlight/config.json` |
 | **双击构建日志** | `scripts/last-build.log`（被 `.gitignore` 的 `*.log` 忽略） |
 
-`config.json` 目前包含的键：`token`、`pinned_channels`（关注列表）、`last_channel_id`、`ui`（界面状态，见 3.8）。
+`config.json` 目前包含的键：`pinned_channels`（关注列表）、`last_channel_id`、`ui`（界面状态，见 3.8）。从 v1.2.0 起 token 存在 Keychain 里，不再写进 `config.json`；旧版本留下的 `token` 键会在启动时迁移进 Keychain 并从文件中删除（见 3.10）。
 
 ---
 
@@ -82,14 +83,19 @@ DiscordLight/
   - **原生 -> 前端**：原生执行完毕后，通过 `evaluateJavaScript:` 回调前端指定的 `callback`（`respondToJS:data:`，数据经 JSON 序列化）。
 - **原生 API 封装**：
   - `fetchCurrentUser` / `fetchGuilds` / `fetchGuildChannels` / `fetchDMs` / `fetchMessages` / `sendMessage`。
-  - `fetchMessages` 接受 `{channelId, limit}` 和可选的 `after`（snowflake id）。`after` 只有在全部是 ASCII 数字、长度 1~20 时才拼进请求 URL（`&after=`），否则直接忽略，按不带 `after` 处理。轮询怎么用它见 3.9。
+  - `fetchMessages` 接受 `{channelId, limit}` 和可选的 `after` 或 `before`（snowflake id）。两者都只有在全部是 ASCII 数字、长度 1~20 时才拼进请求 URL（`&after=` / `&before=`），否则直接忽略。Discord 一次只接受其中一个：有合法的 `after` 时用 `after`，否则才看 `before`。请求失败时回答 `{messages: [], error}`。轮询怎么用 `after` 见 3.9，向上翻历史怎么用 `before` 见 3.12。
   - `sendInteraction`：向 Discord `/interactions` 端点发送原生交互式按钮组件点击。
   - `getConfig`：返回 `config.json` 的内容，**但不含 `token`**，只附带 `hasToken` 布尔值（见 4.3）。
-  - `saveConfig`：接受 `token` / `pinned_channels` / `last_channel_id` / `ui` 四个键，写回 `config.json`。
+  - `saveConfig`：接受 `token` / `pinned_channels` / `last_channel_id` / `ui` 四个键。`token` 只写进 Keychain（空字符串则删除 Keychain 条目），永远不写进 `config.json`；其余三个键写回 `config.json`（见 3.10）。
+  - `clearToken`：退出登录用，删除 Keychain 里的 token 并清掉内存里的 token（`config.json` 里如果还有旧的 `token` 键也一并删除）。目前前端还没有调用它的入口（见 3.10）。
+  - `notify`：接收 `{title, body, channelId, tag}`，发一条系统通知；`tag` 是消息 id，用作通知的 identifier。是否该发由前端的 `maybeNotify` 决定（见 3.11）。
+  - `setBadge`：接收 `{count}`，设置 Dock 图标角标；`count` 为 0 时清除角标（见 3.11）。
   - `updateTouchBar`：接收 `{channelId, channelName, bots, members, pinned}` 并重建 Touch Bar（`bots` 是智能体，`members` 是多人群聊里的真人成员，分类规则见 3.2）。
 - **原生调用前端的入口**（原生通过 `evaluateJavaScript:` 调用，改名即失效）：
   - Touch Bar 按钮：`window.touchBarAction('logo')`、`window.insertMentionFromTouchBar(name)`、`window.switchChannelById(id)`、`window.loadMessages()`。
+  - 点击系统通知：`window.switchChannelById(id)`（`id` 来自通知的 `channelId`，经 `jsStringLiteral:` 编码，见 3.11）。
   - 窗口可见性：`window.setAppVisible(true | false)`，由 `windowDidChangeOcclusionState:`、`applicationDidHide:`、`applicationDidUnhide:` 调用，决定轮询间隔（见 3.9）。
+  - 窗口焦点：`window.setAppFocused(true | false)`，由 `windowDidBecomeKey:` / `windowDidResignKey:` 调用，页面加载完成时（`didFinishNavigation:`）再按当前状态调用一次，决定是否发系统通知（见 3.11）。
 - **开发者工具**：
   - 在 `main.m` 中开启了 `developerExtrasEnabled = YES`，在运行界面**右键即可选择「检查元素（Inspect Element）」**调出 WebKit Safari 开发者工具，极大降低前端与网络调试成本。
 
@@ -122,6 +128,7 @@ DiscordLight/
   - 构造标准的 Discord Type 3 Component Interaction Payload，调用原生的 `sendInteraction` 接口直连 API，完美触发 Agent 后续任务流。
   - 按钮组如果是“批准 / 拒绝”类提示，会渲染成审批卡片（见 3.6）；其余按钮保持普通按钮行。
   - **链接按钮（style 5）不是交互**：它带 `url`、没有 `custom_id`，渲染为普通链接而不是 `data-act="component"` 按钮，永远不会调用 `sendInteraction`（见 3.6）。
+  - **下拉选择菜单（select menu）暂不支持**：显示为一个禁用样式的占位按钮，不带 `data-act`，也不计入审批判定（见 3.12）。
 
 ### 3.4 全局搜索与多人群聊分组 (`web/app.js`)
 - **多人群聊模型**：Discord API `/users/@me/channels` 会同时返回普通私聊（`type: 1`）和多人群聊（Group DM，`type: 3`）。
@@ -193,7 +200,7 @@ DiscordLight/
 - 窗口样式带 `NSWindowStyleMaskFullSizeContentView`，并设置 `titlebarAppearsTransparent = YES` 与 `titleVisibility = NSWindowTitleHidden`：网页内容铺满整个窗口，红绿灯按钮直接悬浮在侧栏左上角。
 - **`DLDragStripView`**：一条 240×38 的透明原生视图，盖在侧栏顶部（是 `contentView` 的子视图，叠在 `WKWebView` 之上）。原因是标题栏没有了，而 `WKWebView` 会吞掉所有 mouseDown，窗口将无法拖动。该视图把按下事件交还给窗口（`performWindowDragWithEvent:`），双击执行缩放（`performZoom:`），行为与真标题栏一致。
 - **必须保持同步的两个数字**：`main.m` 里拖拽条的 `240 × 38`，与 `style.css` 里 `.sidebar { width: 240px }`、`.sidebar-header { padding-top: 38px }`。这 38px 的留白带里不能放任何可交互元素（会被拖拽条挡住点不到）。
-- **窗口 delegate**：`AppDelegate` 现在同时是窗口的 delegate（`self.window.delegate = self`），用来接收 `windowDidChangeOcclusionState:`，把窗口是否可见告诉前端（见 3.9）。
+- **窗口 delegate**：`AppDelegate` 现在同时是窗口的 delegate（`self.window.delegate = self`），用来接收 `windowDidChangeOcclusionState:`，把窗口是否可见告诉前端（见 3.9）；v1.2.0 起还接收 `windowDidBecomeKey:` / `windowDidResignKey:`，把窗口是否有焦点告诉前端（见 3.11）。
 
 > **⚠️ 内存管理：`main.m` 现在用 ARC 编译，请保持**
 >
@@ -245,16 +252,80 @@ DiscordLight/
 | 窗口不可见（完全被遮挡、最小化、在别的桌面，或应用被隐藏） | 15 s | 同上两行 |
 | 从不可见变为可见 | 立即一次 | resync `{channelId, limit: 15}`，之后回到 2.5 s |
 | 引导弹窗（填 token）打开时 | 不轮询 | — |
+| 向上翻历史（不属于轮询，见 3.12） | 滚到顶部附近时一次 | `{channelId, limit: 40, before: <当前最旧消息 id>}` |
 
-- **增量轮询**：`after` 是当前显示的最新消息 id（`state.lastMessageId`）。空回答直接返回。有新消息时先去掉已经显示过的 id（防止与整页重载竞争而重复），再合并到最上面重绘。频道里还没有任何消息时，轮询直接读最新 15 条。
-- **resync**：`after` 看不到编辑，比如 Bot 禁用审批按钮、线程回复数变化、消息被删除。所以每第 12 次轮询改为重读最新 15 条，用 `messagesSignature` 与当前显示的比较（id 与顺序、`edited_timestamp`、组件的 `disabled`、线程的 id / 回复数 / 名称），**只有变了才重绘**。合并由 `mergeLatest` 完成：重读范围内消失的消息视为已删除，比范围更早的保留；显示中比重读结果还新的消息也视为已删除，除非它是 resync 请求发出之后才由一次整页重载显示出来的。
-- **整页重载**：`after` 回答满 50 条（例如 Mac 睡眠后醒来），或者 resync 的 15 条够不到当前显示的最新消息时，中间可能有缺口，改为 `limit: 40` 整页重载。
-- **内存上限**：前端最多保留 100 条消息（`MAX_MESSAGES`），合并时截断。
+- **增量轮询**：`after` 是当前显示的最新消息 id（`state.lastMessageId`）。空回答直接返回。有新消息时先去掉已经显示过的 id（防止与整页重载竞争而重复），再合并到最上面重绘，并把这些新消息交给 `maybeNotify`（见 3.11）。频道里还没有任何消息时，轮询直接读最新 15 条。
+- **resync**：`after` 看不到编辑，比如 Bot 禁用审批按钮、线程回复数变化、消息被删除。所以每第 12 次轮询改为重读最新 15 条，用 `messagesSignature` 与当前显示的比较（id 与顺序、`edited_timestamp`、组件的 `disabled`、线程的 id / 回复数 / 名称、embed 与附件的数量），**只有变了才重绘**。合并由 `mergeLatest` 完成：重读范围内消失的消息视为已删除，比范围更早的保留；显示中比重读结果还新的消息也视为已删除，除非它是 resync 请求发出之后才由一次整页重载显示出来的。重绘时只有此前没显示过、且比 resync 发出时的最新 id 更新的消息才交给 `maybeNotify`（`arrivedSince`，见 3.11）。
+- **整页重载**：`after` 回答满 50 条（例如 Mac 睡眠后醒来），或者 resync 的 15 条够不到当前显示的最新消息时，中间可能有缺口，改为 `limit: 40` 整页重载（`pollReloadNewest`）。中间的缺口无法显示，所以这条路径会丢掉已经向上翻出来的历史（见 3.12）；通知同样只针对新 id。
+- **内存上限**：平时前端最多保留 100 条消息（`MAX_MESSAGES`）；用户向上翻过历史之后（`state.historyLoaded`）上限放宽到 400 条（`HISTORY_MAX`），这样下一次轮询不会把刚翻出来的几页截掉。截断统一由 `capMessages` 完成，截掉最旧的消息后更早的历史又可以重新翻到（见 3.12）。
 - **并发与过期回答**：同一时间只有一个轮询请求在途，上一个还没回来时定时器这一拍直接跳过。切换频道时 `pollGen` 加一并重置计数，旧频道迟到的回答一律丢弃。
 - **可见性**：原生在 `windowDidChangeOcclusionState:`、`applicationDidHide:`、`applicationDidUnhide:`（取消隐藏时窗口仍在 Dock 里则算不可见）里调用 `window.setAppVisible(bool)`；网页自己的 `document.visibilitychange` 作为后备。值没变时是空操作。变为可见时立即做一次 resync，所以后台期间的编辑一回到前台就能看到。
 - **状态栏文字**：可见时 `已连接`，不可见时 `已连接 · 后台低频`。
-- **常量**都在 `app.js` 的轮询段：`POLL_MS = { active: 2500, hidden: 15000 }`、`POLL_AFTER_LIMIT = 50`、`RESYNC_LIMIT = 15`、`RESYNC_EVERY = 12`、`MAX_MESSAGES = 100`。`window.__DL_POLL_MS` 只给冒烟测试缩短间隔用，应用里不存在。
-- **代价**：别人编辑消息要等下一次 resync 才看得到（可见时最多约 30 s，后台最多约 3 min）；整页重载会丢失滚动位置。改这一段逻辑后务必跑 `make test`（`polling` 与 `polling-edge` 两个套件专门测它）。
+- **常量**都在 `app.js` 的轮询段：`POLL_MS = { active: 2500, hidden: 15000 }`、`POLL_AFTER_LIMIT = 50`、`RESYNC_LIMIT = 15`、`RESYNC_EVERY = 12`、`MAX_MESSAGES = 100`；向上翻历史的常量（`LOAD_LIMIT`、`HISTORY_PAGE`、`HISTORY_MAX` 等）在它前面的消息加载段（见 3.12）。`window.__DL_POLL_MS` 只给冒烟测试缩短间隔用，应用里不存在。
+- **代价**：别人编辑消息要等下一次 resync 才看得到（可见时最多约 30 s，后台最多约 3 min）；没有向上翻过历史时，整页重载会把列表换成最新 40 条，滚动位置保不住。改这一段逻辑后务必跑 `make test`（`polling` 与 `polling-edge` 两个套件专门测它，`notify` 测轮询路径上的通知，`content` 测与向上翻历史的配合）。
+
+### 3.10 Token 存储（Keychain）(`src/main.m`)
+从 v1.2.0 起 token 不再明文写在 `config.json` 里，而是存进 macOS 钥匙串：login keychain 里的一条通用密码（generic password），service 为 `com.sidney.DiscordLight`，account 为 `discord-token`。在“钥匙串访问”App 里搜 `com.sidney.DiscordLight` 可以找到。
+
+- **查找顺序**（启动时，`applicationDidFinishLaunching:`）：
+  1. **环境变量 `DISCORD_TOKEN`**：非空就直接使用，**完全不读写 Keychain**（开发用）。
+  2. **Keychain 条目**。
+  3. **旧版 `config.json` 的 `token` 键**：Keychain 里没有而文件里有时，先写进 Keychain（迁移）；只要 Keychain 里有了 token（原来就有，或刚迁移成功），就从 `config.json` 删掉 `token` 键并保存。Keychain 不可用（例如用户在系统弹窗里点了拒绝）时，继续使用文件里的旧 token，下次启动再尝试迁移。
+  4. 都没有：前端收到 `hasToken: false`，弹出引导弹窗；用户填的 token 经 `saveConfig` 写进 Keychain。
+- **写入**：`saveConfig {token}` 只写 Keychain（先 `SecItemUpdate`，没有条目时 `SecItemAdd`），空字符串则删除条目；`config.json` 里的 `token` 键无论如何都会被删掉。Keychain 写入失败时，token 只在本次运行中有效，下次启动会重新出现引导弹窗。
+- **`clearToken`**：删除 Keychain 条目，清空内存里的 token，并删掉 `config.json` 里残留的 `token` 键。设置了 `DISCORD_TOKEN` 时，下次启动仍会使用环境变量。前端目前还没有“退出登录”的入口，这个 action 是为它预留的。
+- **API 选择**：用的是传统的（基于文件的）Keychain API，查询里不带 `kSecUseDataProtectionKeychain`，所以不需要 entitlement，也不需要开发者签名证书。读取结果用 `__bridge_transfer` 交给 ARC，符合 3.7 的规则。
+- **⚠️ 每次重新编译后 macOS 会再问一次**：钥匙串条目的访问控制记住的是写入它的那个程序的签名。`make build` 只做 ad-hoc 签名（见 5.2），每次编译出来的签名都不一样，所以重新编译、安装后第一次启动，系统会弹窗询问是否允许 DiscordLight 访问钥匙串。选“始终允许”即可，直到下一次重新编译；点“拒绝”则本次读不到 token，会出现引导弹窗。
+  - **开发时不想反复弹窗**：用环境变量 `DISCORD_TOKEN` 启动。方法与 5.3 的 `DISCORDLIGHT_DEBUG` 相同：先完全退出应用，再在终端里带着这个变量 `open /Applications/DiscordLight.app`。这条路径完全不碰 Keychain，所以不会弹窗。不要把 token 写进脚本、shell 配置或任何会被提交的文件（见 4.2）。
+- **测试**：Keychain 与系统通知都要在 app bundle 里测，也就是 `make install` 之后运行 `/Applications/DiscordLight.app`，不要直接运行裸二进制（AGENTS.md 第 8 条）。
+
+### 3.11 系统通知与 Dock 角标 (`web/app.js` + `src/main.m`)
+该不该发、发什么，全部由前端的 `maybeNotify(newMessages)` 决定（`app.js` 里 `// ===== [WP2 notifications] BEGIN … END =====` 之间的一段）；原生只负责显示通知、设置角标、处理点击。
+
+- **只看轮询新到的消息**：只有轮询路径会调用 `maybeNotify`，传入的也只是这次轮询新到的消息：
+  - 增量轮询（`after`）：去掉已显示 id 之后的新消息。
+  - resync 与整页重载（`pollReloadNewest`）：经 `arrivedSince(list, sinceId, prevShown)` 过滤，只留下比请求发出时的最新 id 更新、且重绘前没有显示过的消息，所以同一条消息不会通知两次。
+  - 打开 / 切换频道、刷新与发送后的重载（`loadMessages`）、向上翻历史（`loadOlderMessages`）**永远不通知**；频道里还没有任何消息时的那种轮询（直接读最新 15 条）也不通知。
+- **条件**：窗口不是 key window（`state.focused` 为假）**或**窗口看不见（`state.visibility === "hidden"`，见 3.9）；并且消息满足下面任意一条：
+  - @ 了当前用户（`mentions` 里有自己），或 `mention_everyone` 为真（@everyone）。@ 自己所在的角色不算（没有检查 `mention_roles`）。
+  - 当前频道是私信（`type 1`）或多人群聊（`type 3`）：其中任何一条消息都通知。关注列表里旧版保存的条目不带 `type` 时，按 id 去 `state.groups` / `state.dms` 里查。
+  - 是审批请求：有未禁用的非链接按钮，且 `isApprovalPrompt` 命中（见 3.6）。
+  - 自己发的消息永远不通知。
+- **标题**：作者显示名（与消息列表同一规则：`KNOWN_BOTS` → 已知用户 → `global_name` / `username`）；服务器频道和线程在后面加 ` · #频道名`，私信与多人群聊不加。
+- **正文**（`notifBody`）：纯文本，不做 HTML 转义（原生原样显示，不会被当作标记）。`<@id>` 换成 `@名字`，`<@&id>` 换成 `@角色名`（`KNOWN_ROLES` 里没有的写 `@Role`），`<#id>` 换成 `#频道名`（找不到时是 id），自定义表情换成 `:name:`；连续空白合并为一个空格；超过 140 个字符截断并加 `…`。没有文字时，审批请求写 `[审批请求]`，其他一律写 `[附件]`（只有 embed 的消息也是这一类）。
+- **数量**：每次轮询最多发 5 条横幅（`NOTIFY_MAX_PER_TICK`）：取最新的 5 条，从旧到新依次发，最新的一条在最上面。角标计数包含所有符合条件的消息，不受这 5 条的限制。
+- **Dock 角标**：`state.unreadNotified` 累计自上次获得焦点以来符合条件的消息数，每次通过 `setBadge {count}` 更新（原生设置 `NSApp.dockTile.badgeLabel`）。窗口重新成为 key window 时，原生在 `windowDidBecomeKey:` 里先清掉角标，前端的 `setAppFocused(true)` 再把计数归零并发 `setBadge {count: 0}`。
+- **点击通知**：`didReceiveNotificationResponse:` 激活应用、把窗口提到最前，再调用 `window.switchChannelById(channelId)`。`switchChannelById` 依次在关注列表、私信、多人群聊（`state.groups`，所以没关注的群聊也能打开）、已加载的服务器频道里找；线程 id 不在这些列表里，找不到（见 6.1）。
+- **应用在前台时也显示横幅**：`willPresentNotification:` 返回 banner + sound（macOS 11 以下用 alert），前端已经判断过该不该发，原生不再过滤。
+- **原生要求**：
+  - `UNUserNotificationCenter` 需要 app bundle。没有 bundle identifier 的裸二进制里调用它会抛异常，所以所有通知路径都经过 `notificationCenterOrNil`：裸二进制下 `notify` 什么也不做，回答 `{success: false}`。
+  - 启动时 `setupNotifications` 请求通知权限（提醒、声音、角标），首次启动系统会弹一次授权框。`Info.plist` 里 `NSUserNotificationAlertStyle` 为 `banner`。
+  - Makefile 因此多链接了 `UserNotifications` 框架（见 5.2）。
+- **横幅一直不出现时，按顺序查**：
+  1. **系统设置 → 通知 → DiscordLight**：是否允许通知、提醒样式是否为“横幅”或“提示”。首次授权框里点了“不允许”，就会在这里关着。
+  2. **专注模式 / 勿扰模式**是否打开。
+  3. 是否从 `/Applications/DiscordLight.app` 启动（裸二进制没有通知，见上）。
+  4. 消息是否在**当前打开的频道**里：只有当前频道在轮询，其他频道的消息不会通知（见 6.1）。
+  5. 窗口是否真的失去了焦点：右键 → 检查元素，在 Console 里看 `state.focused` 和 `state.visibility`。窗口是 key window 且可见时，前端本来就不发通知。
+  6. 看 Dock 角标：角标有数字而没有横幅，说明前端已经发了 `notify`，问题在系统通知设置一侧；角标也没有，说明前端没有判定为需要通知（对照上面的条件）。
+
+### 3.12 Embeds、附件与历史回溯 (`web/app.js` + `web/style.css` + `web/index.html`)
+- **位置**：附件与 embed 放在消息正文下方的 `.msg-accessories` 里，由 `messageAccessoriesHTML(m)` 生成；审批请求则放在审批卡片的 `.approval-body` 里，所以 Bot 把要执行的命令放在 embed 里时，用户在卡片里也能看到自己在批准什么。消息没有文字时加 `.lead`，紧贴作者行。
+- **安全规则与正文相同**（见 4.3）：所有字符串都过 `escapeHTML`；所有 `href` / `src` 必须是 http(s)（`safeHttpUrl`），否则不出链接、不出图片；embed 的描述与字段值走 `parseMarkdown`；链接和图片都带 `target="_blank"`，由原生导航策略交给系统浏览器。
+- **Embed 卡片**（`embedHTML`）：左边框颜色取 `embed.color`（0xRRGGBB 整数，其他值用默认边框色）。自上而下：作者、标题（`url` 是 http(s) 时为链接）、描述、字段（两列，`inline` 不为 `true` 的独占一行）、右侧缩略图（缩进 64×64）、大图、页脚 + 时间（`fmtTime`）。`video` / `provider` 忽略。没有文字的 `image` / `gifv` 类 embed（例如只贴了一个图片或 GIF 链接）只显示图片。上限：每条消息 4 个 embed（`MAX_EMBEDS`），每个 embed 10 个字段（`MAX_EMBED_FIELDS`）。
+- **附件**（`attachmentsHTML`）：图片（`content_type` 以 `image/` 开头，或扩展名为 png / jpg / jpeg / gif / webp）排成一行可换行的图片，按比例缩进 400×300（`IMAGE_MAX`）；其他文件（视频、音频也一样，不自动播放）每个一行：文件图标、文件名、大小、下载链接。每条消息最多 10 个附件（`MAX_ATTACHMENTS`）。
+- **图片加载**：`<img loading="lazy" decoding="async">`，宽高属性按原图尺寸事先算好，图片加载前就占好位置。`src` 优先用 Discord 的媒体代理地址 `proxy_url`（通常是 `media.discordapp.net`），点击打开原图 `url`（通常是 `cdn.discordapp.com`）。图片在渲染之后才加载完：如果当时视图贴在底部（`state.stickToBottom`），`#messagesList` 上捕获阶段的 `load` 监听会把它重新贴到底部。
+- **下拉选择菜单**：组件 type 3 / 5 / 6 / 7 / 8（字符串、用户、角色、可提及对象、频道选择）显示为禁用样式的占位按钮（显示 `placeholder`，没有就写“选择…”；悬停提示“下拉选择暂不支持”）。它不带 `data-act`，点击无效果，也不计入审批判定和“全部按钮已禁用”的统计；只有下拉菜单的消息走普通按钮行。
+- **向上翻历史**（`maybeLoadHistory` / `loadOlderMessages`）：
+  - 视口滚到离顶部 80 px 以内（`HISTORY_TRIGGER_PX`）时，请求 `fetchMessages {limit: 40, before: <当前最旧消息 id>}`（`HISTORY_PAGE`），把更早的一页接到 `state.messages` 末尾（列表是新消息在前）。列表太短、没有滚动条时，每次渲染后直接检查，不等滚动事件。
+  - **锚定**：翻页后的渲染带 `anchorId`（翻页前最旧的那条），保持这一行的底边在屏幕上的位置不变，用户正在看的内容不会跳。
+  - **状态行**：列表上方的 `#historyStatus` 显示“正在载入更早的消息…”，或到上限时显示“只显示最近 400 条消息”；翻到头时什么也不显示。
+  - **上限**：没翻过历史时 100 条（`MAX_MESSAGES`），翻过之后（`state.historyLoaded`）400 条（`HISTORY_MAX`）；到了 400 条就不再往上翻。
+  - **`historyExhausted`**：一页回答不满 40 条，或者回答里没有比当前最旧消息更早的消息时置为真，之后不再请求；打开频道或整页重载的回答不满 40 条时同样置为真。`capMessages` 截掉最旧的消息时置回假（被截掉的部分又可以翻到）。
+  - **失败与过期**：请求失败（回答带 `error`）时等 3 s（`HISTORY_RETRY_MS`）再试。切换频道时（`resetPolling`）历史状态全部复位；迟到的回答（频道已经切换，或一次整页重载已经换掉了列表）直接丢弃。
+  - **与轮询和重载的配合**：增量轮询和 resync 只在最新的一端合并，已经翻出来的历史保留。翻过历史之后的 `loadMessages`（发送后、点普通按钮后、Touch Bar 刷新）如果回答能接上当前显示的最新消息，就按 resync 的方式合并（`mergeLatest(latest, shownTop, LOAD_LIMIT)`），历史和滚动位置都保留；接不上时按普通整页重载处理。轮询发现缺口时的 `pollReloadNewest` 会丢掉已翻出来的历史（见 3.9）。翻出来的旧消息永远不会触发通知（见 3.11）。
+- **`messagesSignature` 包含 embed 与附件的数量**：Discord 常在消息发出之后才补上链接预览，而且不改 `edited_timestamp`。不把数量算进签名的话，resync 看不出变化，预览就一直不显示。
+- **Masked link 还不解析**：`[文字](url)` 的方括号部分原样显示，括号里的 URL 按自动链接规则（4.3 第 6 条）变成链接。Bot 的 embed 描述里常用这种写法（见 6.1）。
 
 ---
 
@@ -263,10 +334,11 @@ DiscordLight/
 > **最高原则**：严禁将任何 Token、Cookie、Session 或私人账号凭证提交到 Git 仓库中。
 
 ### 4.1 Token 发现链条
-客户端遵循严格的本地动态凭据查找顺序：
-1. **系统环境变量**：优先读取 `DISCORD_TOKEN`。
-2. **本地隔离配置文件**：读取 `~/.config/discordlight/config.json`（该文件位于系统用户目录下，与 Git 仓库完全隔离，已被 `.gitignore` 规避）。
-3. **交互式首次引导弹窗**：如均未配置，应用启动时会优雅弹出原生配置引导框，由用户手动输入并安全写入本地 `config.json`。
+客户端遵循严格的本地动态凭据查找顺序（v1.2.0 起，细节见 3.10）：
+1. **系统环境变量**：优先读取 `DISCORD_TOKEN`（这条路径不读写 Keychain）。
+2. **macOS 钥匙串（Keychain）**：service `com.sidney.DiscordLight`、account `discord-token` 的通用密码条目。
+3. **旧版配置文件**：`~/.config/discordlight/config.json` 里旧版本留下的 `token` 键（该文件位于系统用户目录下，与 Git 仓库完全隔离，已被 `.gitignore` 规避）。读到后迁移进 Keychain，并从文件中删除。
+4. **交互式首次引导弹窗**：如均未配置，应用启动时会弹出配置引导框，由用户手动输入，token 只写进 Keychain，不再写进 `config.json`。
 
 ### 4.2 提交流程安全守则
 在执行 `git commit` 和 `git push` 前，请务必运行：
@@ -285,7 +357,8 @@ git diff | grep -iE 'token|secret|password|bearer|mfa'
 5. **导航策略**（`main.m`）：`decidePolicyForNavigationAction` 只放行 `file:` 和 `about:blank`；`http` / `https` / `mailto` 交给系统默认应用（`NSWorkspace openURL:`）并取消站内导航；其余协议一律取消。消息里的链接都带 `target="_blank"`：点击时 WebKit 先以“新窗口”动作询问同一个 `decidePolicyForNavigationAction`（此时已交给系统浏览器并取消）；`createWebViewWithConfiguration:…`（`WKUIDelegate`）兜住 `window.open()` 这类不经过上述回调的路径，同样只把 http(s) 交给系统浏览器并返回 `nil`，永不创建第二个 WebView。带 bridge 的 WebView 因此永远只显示本地页面。
 6. **自动链接规则**：只识别 `http://` / `https://`。URL 取自已转义的文本，同时用作 `href` 和链接文字；URL 内允许出现 `&amp;`，遇到其他实体（引号、尖括号）即结束；结尾的 `.,;:!?*` 和未配对的 `)` 不算进链接。代码块、行内代码、提及内部的 URL 不会变成链接。输出固定为 `<a class="msg-link" target="_blank" rel="noopener noreferrer">`。
 7. **原生拼 JS 时同样要转义**：Touch Bar 按钮调用 `insertMentionFromTouchBar` / `switchChannelById` 时，参数经 `jsStringLiteral:`（JSON 编码）再拼进脚本，Bot 名字里的引号、反斜杠、换行无法逃出字符串。`respondToJS:data:` 把 JSON 拼进 `window.<callback>(…)`：`callback` 只允许字母、数字和下划线（否则直接丢弃这次回调），JSON 文本和 `jsStringLiteral:` 的结果都再过一遍 `JSSafeJSON()`，把 `NSJSONSerialization` 不转义的 U+2028 / U+2029 换成 `\u2028` / `\u2029`（旧版 WebKit 会把它们当成换行，导致整段脚本语法错误）。
-8. **链接按钮的 `url` 只接受 http(s)**：见 3.6。新增任何会生成 `href` 的地方，都要先校验协议，再 `escapeHTML`。
+8. **链接按钮的 `url` 只接受 http(s)**：见 3.6。embed 与附件的 `href` / `src` 同样只接受 http(s)（`safeHttpUrl`，见 3.12）。新增任何会生成 `href` / `src` 的地方，都要先校验协议，再 `escapeHTML`。
+9. **通知正文是纯文本**：`notify` 的 `title` / `body` 不做 HTML 转义，原生原样交给系统通知显示；它们永远不能被写进 `innerHTML`（见 3.11）。
 
 **调试用 eval 入口默认关闭**：`main.m` 里的 `handleTestNotification:` 监听分布式通知 `com.discordlight.test`，收到 `eval:` 前缀的内容会直接在 WebView 里执行（`snapshot` 则把截图写到 `/tmp/discordlight_webview_snapshot.png`）。这是早期的自动化测试入口。分布式通知本机任意进程都能发送，而这个 WebView 握着 bridge（能以用户身份发消息、能通过 `saveConfig` 改写配置），所以从 v1.1.0 起，**只有在启动时设置了非空的环境变量 `DISCORDLIGHT_DEBUG`，才会注册这个监听**；正常启动的应用里这个入口不存在。用法见 5.3。
 
@@ -316,6 +389,8 @@ open /Applications/DiscordLight.app
 # 5. 前端冒烟测试（需要 Node 18+，见 5.4）
 make test
 ```
+
+**`make build` 做了什么**（v1.2.0）：`clang -fmodules -fobjc-arc -framework Cocoa -framework WebKit -framework Security -framework UserNotifications -O2 -Wall` 编译 `src/main.m`（`Security` 用于 Keychain，见 3.10；`UserNotifications` 用于系统通知，见 3.11），再拷入 `Info.plist`、图标和 `web/*`，最后执行 `codesign --force --deep --sign - DiscordLight.app` 做 ad-hoc 签名（没有签名身份；`|| true`，签名失败不会让构建失败）。签名必须是最后一步，因为它会封存包内的文件，之后再往包里拷东西签名就失效了。ad-hoc 签名能降低把 App 打成 zip 分享给别人时出现“已损坏”提示的概率，但它不是正式签名与公证（正式签名与公证仍在规划中）；副作用是每次重新编译签名都会变，Keychain 会重新询问访问权限（见 3.10）。
 
 **双击构建：`scripts/build-and-run.command`**。在 Finder 里双击（或在终端运行）即执行 `make build && make install`，然后重新启动 `/Applications/DiscordLight.app`。输出写到 `scripts/last-build.log`，构建失败时先看这个文件；它被 `.gitignore` 里的 `*.log` 忽略，不会被提交。
 
@@ -352,8 +427,9 @@ make test
   # 之后每次
   make test        # 等同于 cd tests && npm test
   ```
-  `npm test` 运行 `tests/smoke/run-all.cjs`，依次跑六个套件，最后打印每个套件一行汇总，任何一个失败退出码就非 0。单个套件可以直接 `node tests/smoke/run-ui.cjs [web 目录]`。
-- **套件**：`ui`（侧栏、搜索、注入防护、审批卡片、Touch Bar payload、空状态与首次引导）、`links`（Command 快捷键、链接按钮）、`mentions`（智能体与群聊成员的划分：Touch Bar 的 `bots` / `members` 与输入框芯片，见 3.2）、`polling` 与 `polling-edge`（3.9 的轻量轮询）、`fuzz-markdown`（30000 条随机恶意输入喂给 `parseMarkdown`）。
+  `npm test` 运行 `tests/smoke/run-all.cjs`，依次跑八个套件，最后打印每个套件一行汇总，任何一个失败退出码就非 0。单个套件可以直接 `node tests/smoke/run-ui.cjs [web 目录]`。
+- **套件**：`ui`（侧栏、搜索、注入防护、审批卡片、Touch Bar payload、空状态与首次引导）、`links`（Command 快捷键、链接按钮）、`mentions`（智能体与群聊成员的划分：Touch Bar 的 `bots` / `members` 与输入框芯片，见 3.2）、`polling` 与 `polling-edge`（3.9 的轻量轮询）、`notify`（3.11 的系统通知与 Dock 角标：`notify` / `setBadge` 的调用与 payload、`setAppFocused`）、`content`（3.12 的 embed、附件、下拉选择占位与 `before` 向上翻历史）、`fuzz-markdown`（30000 条随机恶意输入喂给 `parseMarkdown`）。
+- **测不到的部分**：冒烟测试只覆盖前端。Keychain、系统通知的实际显示、Dock 角标、通知点击这些原生行为，需要 `make install` 后用安装好的应用手动验证（AGENTS.md 第 8 条）。
 - **截图**写到 `tests/smoke/.shots/<套件>/`（已 gitignore）。失败时打印 INFO（实测数值），`DL_TEST_VERBOSE=1` 时通过也打印。
 - 轮询套件把间隔缩短到 150 ms 测计时，机器负载很高时可能误报，重跑一次再判断。加用例的方法见 `tests/README.md`。
 
@@ -369,15 +445,15 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
 
 ## 6. 后续演进建议与待办事项 (Roadmap & Backlog)
 
-### 6.1 当前已知限制（v1.1.0）
+### 6.1 当前已知限制（v1.2.0）
 - **没有 Gateway**：所以没有“正在输入”、在线状态和未读标记；别人编辑消息要等下一次 resync 才看得到（可见时最多约 30 s，后台最多约 3 min，见 3.9）。
-- **消息窗口只有 100 条**（`MAX_MESSAGES`），没有向上翻历史。
-- **整页重载会丢失滚动位置**：发送消息后、点普通按钮后的刷新、Touch Bar 刷新，以及轮询发现可能有缺口时，都会重新只取最新 40 条，往上翻看的位置保不住。
-- **Embeds 不渲染**，只显示 `content`（见下方第 8 项）。
-- **下拉选择菜单（select menu）组件被渲染成按钮**，点了也不会弹出选项。
+- **系统通知只覆盖当前打开的频道**：只有当前频道在轮询，其他频道、其他私信里的 @ 和消息都不会通知，也不计入 Dock 角标（见 3.11）。要覆盖所有频道，需要先完成下方第 1 项 Gateway。
+- **点击来自线程的通知打不开线程**：`switchChannelById` 只在关注列表、私信、多人群聊和已加载的服务器频道里找，线程 id 不在其中（已关注的线程除外），点击后只会把窗口提到前面（见 3.11）。
+- **Masked link（`[文字](url)`）还不解析**：方括号原样显示，只有括号里的 URL 变成链接（见 3.12）。
+- **整页重载的滚动位置**：没有向上翻过历史时，发送消息后、点普通按钮后的刷新、Touch Bar 刷新都会重新只取最新 40 条，往上看的位置保不住；轮询发现可能有缺口时（`pollReloadNewest`），即使翻过历史也会丢掉已翻出来的部分（见 3.9、3.12）。
 - **窗口拖动只靠原生的 240×38 拖拽条**（侧栏顶部，双击缩放），聊天区顶栏不能拖（见 3.7）。
 - **浅色模式未实现**：颜色 Token 已经就绪（见 3.5），缺的是浅色取值与原生外观切换。
-- **Discord 服务条款风险不变**：用用户 token 驱动的第三方客户端本身就有被 Discord 限制或封号的风险，v1.1.0 没有改变这一点。
+- **Discord 服务条款风险不变**：用用户 token 驱动的第三方客户端本身就有被 Discord 限制或封号的风险，v1.2.0 没有改变这一点。
 
 ### 6.2 后续规划
 为后续接手该项目的工程师提供以下规划参考：
@@ -390,9 +466,9 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
    - 连接正常时把轮询降到很低的频率，只保留 resync 作为兜底；连接断开或多次重连失败时回到现在的轮询（3.9），状态栏写明当前模式。
    - 需要声明的 intents、事件的字段以 Discord 官方 Gateway 文档为准；这是计划，尚未实现。
 2. **通知与声音增强**
-   - 接入 macOS 原生 `NSUserNotificationCenter` / `UNUserNotificationCenter`，当用户被 `@` 或有 Agent 回复时弹出系统级角标与气泡通知。
+   - v1.2.0 已接入 `UNUserNotificationCenter` 系统通知与 Dock 角标，但只覆盖当前打开的频道（见 3.11、6.1）。接上第 1 项 Gateway 后，可以对所有频道的 @ 与私信发通知；通知点击时能解析线程 id。
 3. **下拉选择与 Modal 组件支持**
-   - 当前已支持按钮（Button Components），后续可扩展支持 Select Menu（下拉选框）以及 Modal 文本输入弹窗。
+   - 当前已支持按钮（Button Components）；下拉选择菜单目前只显示为禁用的占位按钮（见 3.12）。后续可扩展为真正可选的 Select Menu（下拉选框）以及 Modal 文本输入弹窗。
 4. **多账号快速切换**
    - 允许在配置中保存多个 Token，在设置菜单中实现一键无缝热切换。
 5. **浅色模式 / 跟随系统外观**
@@ -401,16 +477,16 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
    - 通过 bridge 把 `NSColor.controlAccentColor` 传给前端，覆盖 `--accent` 系列变量，让强调色跟随系统设置。
 7. **侧栏毛玻璃**
    - 侧栏下方垫 `NSVisualEffectView`，并把 `WKWebView` 设为透明背景，得到原生的 vibrancy 效果。
-8. **Embeds 渲染**
-   - 目前只渲染 `content`。如果 Bot 把要执行的命令放在 embed 里，审批卡片的正文会是空的，用户看不到自己在批准什么。这一项优先级较高。
+8. **Embeds 渲染**（v1.2.0 已完成，见 3.12）
+   - embed 与附件已渲染，审批卡片正文里也会显示 embed。剩下的是 masked link（`[文字](url)`）的解析（见 6.1）。
 9. **未读标记**
    - 侧栏的未读点 / 未读计数依赖实时事件，需要先完成第 1 项 Gateway。
 10. **时区与日期**
     - 时间现在按本地时区显示（`fmtTime`），但只有 `HH:MM`；跨天的消息还没有日期分隔线。
 11. **内存管理**
     - 已切到 ARC（见 3.7）。后续可用 Instruments（Leaks / Allocations）跑一轮长时间使用，确认 WebKit 内容进程那一侧也没有累积。
-12. **向上翻历史**
-    - 滚到顶部时用 `before=<最旧 id>` 再取一页（原生 `fetchMessages` 需要像 `after` 一样接受并校验 `before`），同时放宽 100 条的上限；整页重载时保住滚动位置。
+12. **向上翻历史**（v1.2.0 已完成，见 3.12）
+    - `before` 分页、400 条上限、锚定滚动位置都已实现。剩下的是轮询发现缺口时（`pollReloadNewest`）保住已翻出来的历史（见 6.1）。
 
 ---
 
@@ -421,7 +497,11 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
 - **Q: 为什么 Touch Bar 没有显示？**  
   A: 确保在配备物理 Touch Bar 的 MacBook Pro 机型上运行，或在系统设置 -> 键盘 -> 触控栏显示设置为“App 控制”。若在虚拟机/无 Touch Bar 设备上，Touch Bar 逻辑将安全静默跳过，输入框下方的智能体快捷按钮仍可正常工作。
 - **Q: 重新拉取代码后配置丢了吗？**  
-  A: 不会。所有配置均存放在用户家目录 `~/.config/discordlight/config.json`，与 Git 代码目录解耦。
+  A: 不会。配置存放在用户家目录 `~/.config/discordlight/config.json`，token 存在 macOS 钥匙串里（见 3.10），都与 Git 代码目录解耦。
+- **Q: 每次重新编译安装后，启动时都弹窗问能不能访问钥匙串？**  
+  A: 这是 ad-hoc 签名的预期行为：每次编译签名都会变，钥匙串把新版本当成另一个程序（见 3.10、5.2）。选“始终允许”即可。开发时频繁重编译，可以用 `DISCORD_TOKEN` 环境变量启动，这条路径不碰钥匙串。
+- **Q: 被 @ 了却没有系统通知？**  
+  A: 先确认消息在当前打开的频道里，并且窗口当时不在前台（只有当前频道在轮询，窗口是 key window 且可见时不发通知）。其余排查步骤见 3.11 的“横幅一直不出现时”。
 - **Q: 为什么旧版关注的频道名前面有图标残留 / 图标不对？**  
   A: 旧版把 emoji 写进了 `pinned_channels`（`icon` 字段和名字前缀）。新版在显示时会自动剥掉这些前缀并换成描边图标（见 3.8 的“旧版关注数据的兼容”），正常情况下不需要手动处理。如果某一条仍然不对，取消关注再重新关注一次，它会按新格式（`icon: "channel" | "group" | "dm" | "thread"`）保存。改动相关正则时务必保留 `u` 标志。
 - **Q: 为什么窗口拖不动 / 拖拽条在哪？**  
@@ -436,6 +516,22 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
 ---
 
 ## 8. 变更记录 (Changelog)
+
+### v1.2.0 (2026-10-08)
+- **Embeds 与附件**。embed 渲染为卡片（颜色边框、作者、标题链接、Markdown 描述、两列字段、缩略图、大图、页脚与时间；每条最多 4 个 embed、每个最多 10 个字段）；只有图片的 `image` / `gifv` embed 只显示图片；审批卡片正文里也显示 embed。附件中的图片按比例缩进 400×300、懒加载、走 Discord 媒体代理地址，其他文件显示为带大小和下载链接的文件行（每条最多 10 个）。所有 `href` / `src` 只接受 http(s)；图片加载完成后视图保持贴底（见 3.12）。
+- **向上翻历史**。`fetchMessages` 新增可选的 `before`（只接受数字，与 `after` 二选一）；滚到顶部附近时按 40 条一页往前翻，保持锚点不跳，列表上方显示载入状态；翻过历史后上限从 100 条放宽到 400 条；增量轮询与 resync 不丢已翻出来的历史，刷新在能接上当前最新消息时也保留（轮询发现缺口而整页重载时除外）（见 3.9、3.12）。
+- **系统通知与 Dock 角标**。窗口不在前台或看不见时，轮询新到的消息里 @ 了自己 / @everyone、私信与多人群聊消息、审批请求会发系统通知（每次轮询最多 5 条），Dock 角标计数，窗口获得焦点时清零；点击通知打开对应频道（含未关注的多人群聊）。新增 bridge action `notify` / `setBadge`，原生调用 `window.setAppFocused`（见 3.11）。
+- **Token 存进 Keychain**。查找顺序改为 `DISCORD_TOKEN` → Keychain → 旧版 `config.json`（自动迁移并从文件删除）；`saveConfig` 的 token 只写 Keychain；新增 bridge action `clearToken`（见 3.10）。
+- **下拉选择菜单**显示为禁用的占位按钮，不再被渲染成可点的按钮，也不参与审批判定（见 3.12）。
+- **修复**：`messagesSignature` 计入 embed 与附件数量，Discord 事后补上的链接预览在下一次 resync 时就会显示（之前因为 `edited_timestamp` 不变而一直不重绘）。
+- **修复**：中文等输入法打字时，用来确认候选词的 Enter（以及 WebKit 在 `compositionend` 之后紧跟着送出的那个 Enter）会把消息直接发出去。`handleInputKeyDown` 现在在 `isComposing` / `keyCode 229` / 组合输入进行中、以及 `compositionend` 后 150 ms 内一律不发送（`compositionstart` / `compositionend` 监听在 `bindEvents`），冒烟测试里有对应断言。
+- **修复**：首次引导弹窗的文案改为"Token 只保存在本机的 macOS 钥匙串"。
+- **版本号**：`Info.plist` 升到 1.2.0（build 3），并加入 `NSUserNotificationAlertStyle`（banner）与 `LSApplicationCategoryType`。
+- **构建**：Makefile 新链接 `Security` 与 `UserNotifications` 框架，构建最后一步做 ad-hoc 签名（`codesign --sign -`）（见 5.2）。
+- **冒烟测试**：新增 `notify` 与 `content` 两个套件，共八个（见 5.4）。
+- **CI**（`.github/workflows/ci.yml`）：推送到 main 或向 main 提 PR 时，`ubuntu-latest` 上跑八个冒烟测试套件（`tests/` 还没有 lockfile，所以 `npm ci` 失败时退回 `npm install`；失败时把 `tests/smoke/.shots/` 作为 artifact 上传），`macos-14` 上跑 `make build`。
+- **发布**（`.github/workflows/release.yml` + `scripts/package.sh`）：推送 `v*` tag 时在 `macos-14` 上构建 universal（arm64 + x86_64）App，`MACOSX_DEPLOYMENT_TARGET` 取自 `Info.plist` 的 `LSMinimumSystemVersion`，ad-hoc 签名后打成 `DiscordLight-<tag>-macOS.zip` / `.dmg` 和 `SHA256SUMS.txt`，发到 GitHub Release。编译命令仍只在 Makefile 里：universal 是在 PATH 最前面放一个加 `-arch` 的 `clang` 包装再跑 `make build`。本地也能运行（`scripts/package.sh [tag]`，`ARCHS=` 只编当前架构）；产物已加入 `.gitignore`。
+- **社区文件与截图**：`CONTRIBUTING.md`、`SECURITY.md`、`.github/ISSUE_TEMPLATE/`、`.github/PULL_REQUEST_TEMPLATE.md`；README（中英文）重写，资源占用改为实测数字（约 120 MB、CPU 0.1–1.2 %，测法见 README）。README 截图由 `node docs/make-screenshots.cjs` 用假 bridge 和虚构数据生成（`docs/screenshot-main.png`、`docs/screenshot-approval.png`）。
 
 ### v1.1.0 (2026-10-08)
 - **设计重做（Graphite Console）**。原生 macOS 深色主题与设计 Token；全套单色描边图标（移除界面中的 emoji）；人类圆形 / 智能体圆角方形头像；“智能体”标签；审批卡片；连接状态移到侧栏底部；隐藏标题栏并加入原生拖拽条（见 3.5 – 3.7）。

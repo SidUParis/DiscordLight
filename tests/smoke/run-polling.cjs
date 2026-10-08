@@ -302,6 +302,25 @@ const gapsOf = (ts) => ts.slice(1).map((t, i) => Math.round(t - ts[i]));
   await page.waitForFunction(() => document.getElementById("messagesList").innerText.includes("payload 测试"));
   const sends = await page.evaluate(() => window.__calls.filter(c => c.action === "sendMessage"));
   check("(6) sendMessage payload unchanged {action, channelId, content}", sends.length === 1 && keysOf(sends[0]) === "action,channelId,content" && sends[0].channelId === "c1" && sends[0].content === "payload 测试", sends);
+  // IME composition must never send: Enter during composition, and Enter right after compositionend (WebKit quirk)
+  await page.click("#messageInput");
+  await page.keyboard.type("ime 测试");
+  const sendsBeforeIme = sends.length;
+  await page.evaluate(() => {
+    const el = document.getElementById("messageInput");
+    el.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 229, bubbles: true, cancelable: true }));
+    el.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "测试" }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(60);
+  const sendsDuringIme = await page.evaluate(() => window.__calls.filter(c => c.action === "sendMessage"));
+  check("(6) IME: Enter during composition and right after compositionend does not send", sendsDuringIme.length === sendsBeforeIme && (await page.inputValue("#messageInput")) === "ime 测试", sendsDuringIme.length);
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.getElementById("messagesList").innerText.includes("ime 测试"));
+  const sendsAfterIme = await page.evaluate(() => window.__calls.filter(c => c.action === "sendMessage"));
+  check("(6) IME: a real Enter after the grace period sends", sendsAfterIme.length === sendsBeforeIme + 1 && sendsAfterIme[sendsAfterIme.length - 1].content === "ime 测试", sendsAfterIme.length);
   const sentId = await page.evaluate(() => window.__mock.channels.c1[0].id);
   mark = await allCalls();
   await waitFm(mark, 2, "c.after !== undefined");

@@ -1,5 +1,11 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
+#import <Security/Security.h>
+#import <UserNotifications/UserNotifications.h>
+
+// Keychain item that holds the Discord token (generic password in the login keychain)
+static NSString * const DLKeychainService = @"com.sidney.DiscordLight";
+static NSString * const DLKeychainAccount = @"discord-token";
 
 static inline NSString *SafeString(id val) {
     if (!val || val == [NSNull null] || ![val isKindOfClass:[NSString class]]) {
@@ -45,7 +51,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 }
 @end
 
-@interface AppDelegate : NSResponder <NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSTouchBarDelegate>
+@interface AppDelegate : NSResponder <NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSTouchBarDelegate, UNUserNotificationCenterDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) NSString *token;
@@ -138,14 +144,27 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         if (parsed) [self.config addEntriesFromDictionary:parsed];
     }
     
-    // Discover token from environment or config file
-    NSString *envToken = [[[NSProcessInfo processInfo] environment] objectForKey:@"DISCORD_TOKEN"];
+    // Discover the token: DISCORD_TOKEN env (development, never touches the Keychain) -> Keychain -> legacy config.json
+    NSString *envToken = SafeString([[[NSProcessInfo processInfo] environment] objectForKey:@"DISCORD_TOKEN"]);
     if (envToken.length > 0) {
         self.token = envToken;
-    } else if (self.config[@"token"] && [self.config[@"token"] length] > 0) {
-        self.token = self.config[@"token"];
     } else {
-        self.token = @"";
+        NSString *storedToken = [AppDelegate keychainToken];
+        NSString *legacyToken = SafeString(self.config[@"token"]);
+        if (storedToken.length == 0 && legacyToken.length > 0 && [AppDelegate storeKeychainToken:legacyToken]) {
+            storedToken = legacyToken; // moved from the plaintext config file into the Keychain
+        }
+        if (storedToken.length > 0) {
+            self.token = storedToken;
+            if (self.config[@"token"]) {
+                // The Keychain holds the token now: config.json must no longer contain it
+                [self.config removeObjectForKey:@"token"];
+                [self saveConfig];
+            }
+        } else {
+            // Keychain unavailable (access denied): keep using the legacy file token, retry the move next launch
+            self.token = legacyToken;
+        }
     }
 
     NSURLSessionConfiguration *sconfig = [NSURLSessionConfiguration defaultSessionConfiguration];
@@ -209,6 +228,8 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
+    [self setupNotifications];
+
     // Debug automation hook (eval / snapshot via a distributed notification). Any local process can post that
     // notification, so the observer only exists when the app is launched with DISCORDLIGHT_DEBUG set (non-empty).
     const char *debugFlag = getenv("DISCORDLIGHT_DEBUG");
@@ -244,6 +265,46 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 - (void)saveConfig {
     NSData *d = [NSJSONSerialization dataWithJSONObject:self.config options:NSJSONWritingPrettyPrinted error:nil];
     [d writeToFile:self.configPath atomically:YES];
+}
+
+#pragma mark - Keychain (token storage)
+
+// Classic file-based keychain API (no kSecUseDataProtectionKeychain): needs no entitlement and no signing identity.
+// An ad-hoc signed build changes with every rebuild, so macOS asks again for keychain access after each rebuild.
++ (NSDictionary *)keychainQuery {
+    return @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: DLKeychainService,
+        (__bridge id)kSecAttrAccount: DLKeychainAccount
+    };
+}
+
++ (NSString *)keychainToken {
+    NSMutableDictionary *query = [[self keychainQuery] mutableCopy];
+    query[(__bridge id)kSecReturnData] = @YES;
+    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    NSData *data = (__bridge_transfer NSData *)result; // ARC owns the returned CFData (nil when nothing was found)
+    if (status != errSecSuccess || ![data isKindOfClass:[NSData class]] || data.length == 0) return nil;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
++ (BOOL)storeKeychainToken:(NSString *)token {
+    if (token.length == 0) return NO;
+    NSData *data = [token dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *query = [self keychainQuery];
+    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)@{(__bridge id)kSecValueData: data});
+    if (status == errSecItemNotFound) {
+        NSMutableDictionary *item = [query mutableCopy];
+        item[(__bridge id)kSecValueData] = data;
+        status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+    }
+    return status == errSecSuccess;
+}
+
++ (void)deleteKeychainToken {
+    SecItemDelete((__bridge CFDictionaryRef)[self keychainQuery]);
 }
 
 - (NSMutableURLRequest *)requestWithURLString:(NSString *)urlStr method:(NSString *)method {
@@ -290,14 +351,30 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     }
     else if ([action isEqualToString:@"saveConfig"]) {
         if (body[@"token"]) {
+            // The token goes to the Keychain only, never into config.json
             self.token = SafeString(body[@"token"]);
-            self.config[@"token"] = self.token;
+            if (self.token.length > 0) {
+                [AppDelegate storeKeychainToken:self.token]; // if access is denied, the token still works for this session
+            } else {
+                [AppDelegate deleteKeychainToken];
+            }
+            [self.config removeObjectForKey:@"token"];
         }
         if (body[@"pinned_channels"]) self.config[@"pinned_channels"] = body[@"pinned_channels"];
         if (body[@"last_channel_id"]) self.config[@"last_channel_id"] = body[@"last_channel_id"];
         // Sidebar UI state (collapsed sections)
         if ([body[@"ui"] isKindOfClass:[NSDictionary class]]) self.config[@"ui"] = body[@"ui"];
         [self saveConfig];
+        [self respondToJS:callback data:@{@"success": @YES}];
+    }
+    else if ([action isEqualToString:@"clearToken"]) {
+        // Log out: forget the stored token (a DISCORD_TOKEN env var still applies on the next launch)
+        [AppDelegate deleteKeychainToken];
+        self.token = @"";
+        if (self.config[@"token"]) {
+            [self.config removeObjectForKey:@"token"];
+            [self saveConfig];
+        }
         [self respondToJS:callback data:@{@"success": @YES}];
     }
     else if ([action isEqualToString:@"fetchCurrentUser"]) {
@@ -350,8 +427,13 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         // Incremental poll: only messages newer than this snowflake id. ASCII digits only, anything else is ignored.
         NSString *after = SafeString(body[@"after"]);
         NSCharacterSet *notDigit = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet];
+        // Scroll-back page: only messages older than this snowflake id, same rule. Discord takes one of after / before,
+        // so `before` is used only when no valid `after` was given.
+        NSString *before = SafeString(body[@"before"]);
         if (after.length > 0 && after.length <= 20 && [after rangeOfCharacterFromSet:notDigit].location == NSNotFound) {
             url = [url stringByAppendingFormat:@"&after=%@", after];
+        } else if (before.length > 0 && before.length <= 20 && [before rangeOfCharacterFromSet:notDigit].location == NSNotFound) {
+            url = [url stringByAppendingFormat:@"&before=%@", before];
         }
         NSMutableURLRequest *req = [self requestWithURLString:url method:@"GET"];
         [[self.session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -466,6 +548,28 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
                 }
             }];
         });
+        [self respondToJS:callback data:@{@"success": @YES}];
+    }
+    else if ([action isEqualToString:@"notify"]) {
+        // System notification; clicking it brings the window back and opens body.channelId (see didReceiveNotificationResponse)
+        UNUserNotificationCenter *center = [self notificationCenterOrNil];
+        if (center) {
+            UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+            content.title = SafeString(body[@"title"]);
+            content.body = SafeString(body[@"body"]);
+            content.sound = [UNNotificationSound defaultSound];
+            content.userInfo = @{@"channelId": SafeString(body[@"channelId"])};
+            NSString *tag = SafeString(body[@"tag"]);
+            NSString *identifier = tag.length > 0 ? tag : [NSUUID UUID].UUIDString;
+            UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:identifier content:content trigger:nil];
+            [center addNotificationRequest:request withCompletionHandler:nil];
+        }
+        [self respondToJS:callback data:@{@"success": @(center != nil)}];
+    }
+    else if ([action isEqualToString:@"setBadge"]) {
+        id rawCount = body[@"count"];
+        NSInteger count = [rawCount isKindOfClass:[NSNumber class]] ? [rawCount integerValue] : 0;
+        [NSApp dockTile].badgeLabel = count > 0 ? [NSString stringWithFormat:@"%ld", (long)count] : nil;
         [self respondToJS:callback data:@{@"success": @YES}];
     }
 }
@@ -820,6 +924,73 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 - (void)applicationDidUnhide:(NSNotification *)notification {
     // A window left in the Dock stays hidden after unhide (its occlusion state does not change then)
     [self notifyWebVisible:![self.window isMiniaturized]];
+}
+
+#pragma mark - Focus, Dock badge & notifications
+
+// The web layer only notifies while the window is not key (or cannot be seen): app.js setAppFocused / maybeNotify
+- (void)notifyWebFocused:(BOOL)focused {
+    NSString *js = [NSString stringWithFormat:@"window.setAppFocused && window.setAppFocused(%@);", focused ? @"true" : @"false"];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    [NSApp dockTile].badgeLabel = nil;
+    [self notifyWebFocused:YES];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+    [self notifyWebFocused:NO];
+}
+
+// The page can finish loading after the window became key: hand it the current focus state once it is ready
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    [self notifyWebFocused:self.window.isKeyWindow];
+}
+
+// UNUserNotificationCenter needs an app bundle: run as a bare binary (no bundle identifier) it throws, so every
+// notification path goes through this and simply does nothing there.
+- (UNUserNotificationCenter *)notificationCenterOrNil {
+    if ([NSBundle mainBundle].bundleIdentifier.length == 0) return nil;
+    @try {
+        return [UNUserNotificationCenter currentNotificationCenter];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+- (void)setupNotifications {
+    UNUserNotificationCenter *center = [self notificationCenterOrNil];
+    if (!center) return;
+    center.delegate = self;
+    [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                          completionHandler:^(BOOL granted, NSError *error) {}];
+}
+
+// Show the banner even when the app is frontmost (the web layer already decided it should be shown)
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center willPresentNotification:(UNNotification *)notification withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
+    if (@available(macOS 11, *)) {
+        completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
+#pragma clang diagnostic pop
+    }
+}
+
+// Clicked notification: bring the window back and open the channel the message came from
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center didReceiveNotificationResponse:(UNNotificationResponse *)response withCompletionHandler:(void (^)(void))completionHandler {
+    NSString *channelId = SafeString(response.notification.request.content.userInfo[@"channelId"]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp activateIgnoringOtherApps:YES];
+        [self.window makeKeyAndOrderFront:nil];
+        if (channelId.length > 0) {
+            NSString *js = [NSString stringWithFormat:@"window.switchChannelById && window.switchChannelById(%@);", [self jsStringLiteral:channelId]];
+            [self.webView evaluateJavaScript:js completionHandler:nil];
+        }
+    });
+    completionHandler();
 }
 @end
 

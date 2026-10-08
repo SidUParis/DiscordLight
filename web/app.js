@@ -53,7 +53,9 @@ const ICONS = {
   chevronDown: '<path d="M6 9l6 6 6-6"/>',
   arrowUp: '<path d="M12 19V5"/><path d="M6 11l6-6 6 6"/>',
   back: '<path d="M15 18l-6-6 6-6"/>',
-  external: '<path d="M14 4h6v6"/><path d="M20 4L10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
+  external: '<path d="M14 4h6v6"/><path d="M20 4L10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  download: '<path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/>'
 };
 
 function iconSVG(name, size = 16) {
@@ -124,7 +126,13 @@ const state = {
   polling: false,   // a poll request is in flight: ticks are skipped until it answers
   pollCount: 0,     // polls made in the current channel; every RESYNC_EVERY-th one re-reads the newest messages
   pollGen: 0,       // bumped on channel switch, so an answer for the previous channel is dropped
-  resyncDue: false  // the next poll re-reads the newest messages (set when the window comes back)
+  resyncDue: false, // the next poll re-reads the newest messages (set when the window comes back)
+  // Scroll-back history (see loadOlderMessages)
+  historyLoading: false,   // a `before` page request is in flight
+  historyExhausted: false, // nothing older than the oldest shown message (or it cannot be reached)
+  historyLoaded: false,    // the user scrolled back and older pages were added: the cap is HISTORY_MAX, not MAX_MESSAGES
+  historyRetryAt: 0,       // after a failed page request, wait until this time (ms) before asking again
+  stickToBottom: true      // the viewport was at the bottom at the last render / scroll: image loads keep it there
 };
 
 // Sidebar sections, top to bottom: 常用关注 / 群聊与私信 / 服务器
@@ -162,6 +170,7 @@ const pinToggleBtn = document.getElementById("pinToggleBtn");
 const refreshBtn = document.getElementById("refreshBtn");
 const messagesList = document.getElementById("messagesList");
 const messagesViewport = document.getElementById("messagesViewport");
+const historyStatus = document.getElementById("historyStatus");
 const inputAgentChips = document.getElementById("inputAgentChips");
 const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
@@ -333,6 +342,22 @@ function bindEvents() {
           break;
       }
     });
+
+    // Images (attachments, embeds) finish loading after the render: if the view was at the bottom, keep it there.
+    // `load` does not bubble, so the listener runs in the capture phase.
+    messagesList.addEventListener("load", (e) => {
+      if (e.target && e.target.tagName === "IMG" && state.stickToBottom) {
+        messagesViewport.scrollTop = messagesViewport.scrollHeight;
+      }
+    }, true);
+  }
+
+  // Scrolling near the top fetches the previous page of history; the bottom flag drives the image re-pin above
+  if (messagesViewport) {
+    messagesViewport.addEventListener("scroll", () => {
+      state.stickToBottom = isNearBottom();
+      maybeLoadHistory();
+    }, { passive: true });
   }
 
   // Mention popover rows
@@ -360,6 +385,8 @@ function bindEvents() {
   if (messageInput) {
     messageInput.addEventListener("keydown", handleInputKeyDown);
     messageInput.addEventListener("input", handleInputChange);
+    messageInput.addEventListener("compositionstart", () => { state.composing = true; });
+    messageInput.addEventListener("compositionend", () => { state.composing = false; state.compositionEndedAt = Date.now(); });
   }
 }
 
@@ -982,17 +1009,107 @@ function setConnectedStatus() {
 }
 
 // Messages Loading & Rendering
+const LOAD_LIMIT = 40;
+
+// Channel load and full reloads (refresh, after sending, after a button click): the newest LOAD_LIMIT messages.
+// When the user has scrolled back (state.historyLoaded), the answer is merged like a resync instead, so the older
+// pages they loaded (and their scroll position) survive the reload.
 async function loadMessages() {
   if (!state.activeChannel.id) return;
   const channelId = state.activeChannel.id;
-  const res = await callNative("fetchMessages", { channelId, limit: 40 });
+  const gen = state.pollGen;
+  const shownTop = state.lastMessageId;
+  const res = await callNative("fetchMessages", { channelId, limit: LOAD_LIMIT });
   if (channelId !== state.activeChannel.id) return; // switched away while loading: this answer is for another channel
   if (res && res.messages) {
     setConnectedStatus();
-    renderMessages(res.messages);
+    const latest = res.messages;
+    if (state.historyLoaded && gen === state.pollGen && latest.length >= LOAD_LIMIT && state.lastMessageId &&
+        compareSnowflakes(latest[latest.length - 1].id, state.lastMessageId) <= 0) {
+      const merged = mergeLatest(latest, shownTop, LOAD_LIMIT);
+      if (merged[0].id !== state.lastMessageId || messagesSignature(merged) !== messagesSignature(state.messages)) {
+        renderMessages(merged);
+      }
+      return;
+    }
+    resetHistory(latest.length < LOAD_LIMIT);
+    renderMessages(latest);
   } else {
     setStatus("加载失败", "red");
   }
+}
+
+// Scroll-back history: near the top of the viewport, fetch the page before the oldest shown message and add it to
+// the end of state.messages (newest first). The view is re-anchored so what the user was reading does not move.
+const HISTORY_PAGE = 40;
+const HISTORY_MAX = 400;       // messages kept once the user has scrolled back (MAX_MESSAGES otherwise)
+const HISTORY_TRIGGER_PX = 80; // distance from the top of the viewport that asks for the previous page
+const HISTORY_RETRY_MS = 3000; // pause after a failed page request
+
+// Every full load replaces the list: nothing scrolled back any more; `exhausted` when the load returned a short page
+function resetHistory(exhausted) {
+  state.historyLoaded = false;
+  state.historyExhausted = !!exhausted;
+  state.historyRetryAt = 0;
+}
+
+function isNearBottom() {
+  return messagesViewport.scrollHeight - messagesViewport.scrollTop - messagesViewport.clientHeight < 90;
+}
+
+// The slim row above the list: loading, or the note that the HISTORY_MAX cap was reached. Nothing when exhausted.
+function updateHistoryStatus() {
+  if (!historyStatus) return;
+  let text = "";
+  if (state.historyLoading) text = "正在载入更早的消息…";
+  else if (state.historyLoaded && state.messages.length >= HISTORY_MAX) text = `只显示最近 ${HISTORY_MAX} 条消息`;
+  else if (state.historyExhausted && state.historyLoaded) text = "已经是最早的消息";
+  else if (state.historyRetryAt && Date.now() < state.historyRetryAt) text = "载入更早的消息失败，稍后自动重试";
+  if (historyStatus.textContent !== text) historyStatus.textContent = text;
+  if (historyStatus.hidden !== !text) historyStatus.hidden = !text;
+}
+
+function maybeLoadHistory() {
+  if (state.historyLoading || state.historyExhausted || !state.activeChannel.id) return;
+  if (state.messages.length === 0 || state.messages.length >= HISTORY_MAX || !state.lastMessageId) return;
+  if (messagesViewport.scrollTop >= HISTORY_TRIGGER_PX || Date.now() < state.historyRetryAt) return;
+  loadOlderMessages();
+}
+
+async function loadOlderMessages() {
+  const channelId = state.activeChannel.id;
+  const gen = state.pollGen;
+  const oldest = state.messages[state.messages.length - 1].id;
+  state.historyLoading = true;
+  updateHistoryStatus();
+  const res = await callNative("fetchMessages", { channelId, limit: HISTORY_PAGE, before: oldest });
+  // Switched channel meanwhile: the switch already reset the history flags; this answer belongs to the old channel
+  if (gen !== state.pollGen || channelId !== state.activeChannel.id) return;
+  state.historyLoading = false;
+
+  // The native side answers { messages: [], error } when the request failed: try again a little later
+  if (!res || !Array.isArray(res.messages) || res.error !== undefined) {
+    state.historyRetryAt = Date.now() + HISTORY_RETRY_MS;
+    updateHistoryStatus();
+    return;
+  }
+  // A full reload replaced the list while this page was in flight: it no longer joins on, drop it (scroll again)
+  const shownOldest = state.messages.length ? state.messages[state.messages.length - 1].id : null;
+  if (shownOldest !== oldest) {
+    updateHistoryStatus();
+    return;
+  }
+  const known = new Set(state.messages.map(m => m.id));
+  const older = res.messages
+    .filter(m => m && m.id && !known.has(m.id) && compareSnowflakes(m.id, oldest) < 0)
+    .sort((a, b) => compareSnowflakes(b.id, a.id));
+  if (res.messages.length < HISTORY_PAGE || older.length === 0) state.historyExhausted = true;
+  if (older.length === 0) {
+    updateHistoryStatus();
+    return;
+  }
+  state.historyLoaded = true;
+  renderMessages([...state.messages, ...older].slice(0, HISTORY_MAX), { anchorId: oldest });
 }
 
 // Message polling. Idle cost is what matters here: a poll asks only for messages newer than the newest one shown
@@ -1040,12 +1157,16 @@ window.setAppVisible = function(visible) {
   schedulePoll();
 };
 
-// A channel switch starts polling over; an answer still in flight belongs to the previous channel
+// A channel switch starts polling (and scroll-back history) over; an answer still in flight belongs to the previous channel
 function resetPolling() {
   state.pollGen++;
   state.polling = false;
   state.pollCount = 0;
   state.resyncDue = false;
+  state.historyLoading = false;
+  state.stickToBottom = true;
+  resetHistory(false);
+  updateHistoryStatus();
   if (state.pollTimer !== null) schedulePoll(); // first poll one interval after the switch, not mid-load
 }
 
@@ -1062,6 +1183,7 @@ async function pollMessages() {
       const res = await callNative("fetchMessages", { channelId, limit: RESYNC_LIMIT });
       if (gen !== state.pollGen) return;
       if (res && res.messages && res.messages.length > 0 && res.messages[0].id !== state.lastMessageId) {
+        resetHistory(res.messages.length < RESYNC_LIMIT);
         renderMessages(res.messages);
       }
       return;
@@ -1081,7 +1203,9 @@ async function pollMessages() {
       }
       const merged = mergeLatest(latest, shownTop);
       if (merged[0].id !== state.lastMessageId || messagesSignature(merged) !== messagesSignature(state.messages)) {
+        const prevShown = state.messages; // [WP2 notifications] hook
         renderMessages(merged);
+        maybeNotify(arrivedSince(latest, shownTop, prevShown)); // [WP2 notifications] hook: new ids only
       }
       return;
     }
@@ -1099,32 +1223,48 @@ async function pollMessages() {
     const known = new Set(state.messages.map(m => m.id));
     const fresh = res.messages.filter(m => m && m.id && !known.has(m.id));
     if (fresh.length === 0) return;
-    renderMessages([...fresh, ...state.messages].slice(0, MAX_MESSAGES)); // sets state.messages / lastMessageId
+    renderMessages(capMessages([...fresh, ...state.messages])); // sets state.messages / lastMessageId
+    maybeNotify(fresh); // [WP2 notifications] hook
   } finally {
     if (gen === state.pollGen) state.polling = false;
   }
 }
 
-// More new messages than one poll answer covers: show the newest ones, like a channel load
+// More new messages than one poll answer covers: show the newest ones, like a channel load (this drops any
+// scrolled-back history: the gap in between cannot be shown)
 async function pollReloadNewest(channelId, gen) {
-  const res = await callNative("fetchMessages", { channelId, limit: 40 });
+  const prevTop = state.lastMessageId, prevShown = state.messages; // [WP2 notifications] hook
+  const res = await callNative("fetchMessages", { channelId, limit: LOAD_LIMIT });
   if (gen === state.pollGen && res && Array.isArray(res.messages) && res.messages.length > 0) {
+    resetHistory(res.messages.length < LOAD_LIMIT);
     renderMessages(res.messages);
+    maybeNotify(arrivedSince(res.messages, prevTop, prevShown)); // [WP2 notifications] hook
   }
+}
+
+// Memory cap, applied when new messages come in: MAX_MESSAGES normally, HISTORY_MAX once the user has scrolled back
+// (so the pages they loaded are not cut away by the next poll). Cutting the oldest ones makes older history
+// reachable again.
+function capMessages(list) {
+  const cap = state.historyLoaded ? HISTORY_MAX : MAX_MESSAGES;
+  if (list.length <= cap) return list;
+  state.historyExhausted = false;
+  return list.slice(0, cap);
 }
 
 // The re-read newest messages replace what is shown for their id range. Shown messages inside that range that the
 // re-read no longer contains were deleted; older ones are kept. Shown messages newer than the re-read were deleted
 // too (it is the newest of the channel), unless they are newer than `shownTop` (the top when the re-read was asked):
 // a load that answered while the re-read was in flight added those, so they are kept.
-function mergeLatest(latest, shownTop) {
+// `limit` is what the re-read asked for (RESYNC_LIMIT for the poll resync, LOAD_LIMIT for a reload after scroll-back).
+function mergeLatest(latest, shownTop, limit = RESYNC_LIMIT) {
   const ids = new Set(latest.map(m => m.id));
   const newestId = latest[0].id;
   const oldestId = latest[latest.length - 1].id;
-  const wholeChannel = latest.length < RESYNC_LIMIT; // fewer than asked for: there is nothing older
+  const wholeChannel = latest.length < limit; // fewer than asked for: there is nothing older
   const newer = state.messages.filter(m => !ids.has(m.id) && compareSnowflakes(m.id, newestId) > 0 && compareSnowflakes(m.id, shownTop) > 0);
   const older = wholeChannel ? [] : state.messages.filter(m => !ids.has(m.id) && compareSnowflakes(m.id, oldestId) < 0);
-  return [...newer, ...latest, ...older].slice(0, MAX_MESSAGES);
+  return capMessages([...newer, ...latest, ...older]);
 }
 
 // Snowflake ids are decimal strings without leading zeros: a longer one is larger, equal lengths compare as text
@@ -1135,20 +1275,31 @@ function compareSnowflakes(a, b) {
   return a < b ? -1 : (a > b ? 1 : 0);
 }
 
-// What a re-render would change: ids and their order, edits, button disabled flags, thread cards
+// What a re-render would change: ids and their order, edits, button disabled flags, thread cards, and the number of
+// embeds / attachments (Discord adds link previews to a message later without touching edited_timestamp)
 function messagesSignature(messages) {
   return messages.map(m => {
     const buttons = (m.components || []).map(row =>
       (row.components || []).map(c => `${c.custom_id || c.url || ""}:${c.disabled ? 1 : 0}`).join(",")
     ).join(";");
     const thread = m.thread ? `${m.thread.id}:${m.thread.message_count || 0}:${m.thread.name || ""}` : "";
-    return `${m.id}|${m.edited_timestamp || ""}|${buttons}|${thread}`;
+    const media = `${Array.isArray(m.embeds) ? m.embeds.length : 0}:${Array.isArray(m.attachments) ? m.attachments.length : 0}`;
+    return `${m.id}|${m.edited_timestamp || ""}|${buttons}|${thread}|${media}`;
   }).join("\n");
 }
 
-function renderMessages(messages) {
+// Bottom edge of a shown message's row (viewport coordinates), or null
+function rowBottom(messageId) {
+  const row = messagesList.querySelector(`.message-row[data-msg-id="${CSS.escape(String(messageId))}"]`);
+  return row ? row.getBoundingClientRect().bottom : null;
+}
+
+// opts.anchorId (scroll-back): keep that message's row where it is on screen, instead of the bottom pinning. Its
+// bottom edge is the anchor, so the rows below it stay put even if it now groups with an older message above it.
+function renderMessages(messages, opts) {
   if (!messages || messages.length === 0) {
     messagesList.innerHTML = `<div class="state-empty">暂无历史消息</div>`;
+    updateHistoryStatus();
     return;
   }
   state.lastMessageId = messages[0].id;
@@ -1195,7 +1346,9 @@ function renderMessages(messages) {
     }
   });
 
-  const isScrolledToBottom = messagesViewport.scrollHeight - messagesViewport.scrollTop - messagesViewport.clientHeight < 90;
+  const isScrolledToBottom = isNearBottom();
+  const anchorId = opts && opts.anchorId ? opts.anchorId : null;
+  const anchorBefore = anchorId ? rowBottom(anchorId) : null;
 
   // Render in chronological order with grouping
   const sorted = [...messages].reverse();
@@ -1215,13 +1368,21 @@ function renderMessages(messages) {
     prevMsg = m;
   }
 
+  updateHistoryStatus();
   messagesList.innerHTML = htmlParts.join("");
 
-  if (isScrolledToBottom) {
+  const anchorAfter = anchorBefore !== null ? rowBottom(anchorId) : null;
+  if (anchorAfter !== null) {
+    messagesViewport.scrollTop += anchorAfter - anchorBefore;
+  } else if (isScrolledToBottom) {
     messagesViewport.scrollTop = messagesViewport.scrollHeight;
   }
+  state.stickToBottom = isNearBottom();
   notifyTouchBar();
   updateAgentChips();
+  // A list too short to scroll never sends a scroll event (and a view already at the top sends none either):
+  // ask for older messages right away when the top is in reach
+  maybeLoadHistory();
 }
 
 function createMessageHTML(m, isFollowUp) {
@@ -1236,17 +1397,33 @@ function createMessageHTML(m, isFollowUp) {
   // Parse markdown
   const formattedContent = parseMarkdown(m.content || "");
 
+  // Attachments and embeds, under the content (inside the approval card body for approval prompts)
+  const accessoriesHTML = messageAccessoriesHTML(m, !formattedContent);
+
   // Parse True Discord Interaction Component Buttons
   let buttonsHTML = "";
   let buttonCount = 0;
   let disabledCount = 0;
   let linkCount = 0;
+  let selectCount = 0;
   const buttonIds = [];
   const buttons = [];
   if (m.components && m.components.length > 0) {
     m.components.forEach(row => {
       if (row.components) {
         row.components.forEach(btn => {
+          if (!btn) return;
+          // Select menus (string / user / role / mentionable / channel) are not supported yet: a disabled-looking
+          // placeholder with no data-act (the delegated listener ignores it), left out of the approval counts
+          if (SELECT_MENU_TYPES.includes(btn.type)) {
+            selectCount++;
+            const placeholder = String(btn.placeholder || "") || "选择…";
+            buttonsHTML += `
+              <button type="button" class="btn-component style-secondary select-menu" aria-disabled="true" title="下拉选择暂不支持">${escapeHTML(placeholder)}${iconSVG("chevronDown", 13)}</button>
+            `;
+            return;
+          }
+          if (btn.type !== undefined && btn.type !== 2) return; // action rows hold only buttons (2) and select menus
           // Link button (style 5): carries a url and no custom_id. It is a plain link (opened in the system browser by
           // the native navigation policy), never an interaction: no data-act, and it is left out of the approval counts.
           if (btn.style === 5) {
@@ -1291,12 +1468,12 @@ function createMessageHTML(m, isFollowUp) {
   }
 
   // Approval Card: a message whose buttons read like an approve / deny prompt renders as one card (head / body / actions)
-  let bodyHTML = `<div class="message-content">${formattedContent}</div>`;
+  let bodyHTML = `<div class="message-content">${formattedContent}</div>${accessoriesHTML}`;
   // An approval answered in this session stays resolved, unless the bot has since swapped in a fresh set of live buttons
   // (only clicks made on an approval card are recorded, see handleComponentClick)
   const answered = state.resolvedInteractions[m.id];
   const resolved = (answered && (disabledCount === buttonCount || buttonIds.includes(answered.customId))) ? answered : null;
-  if (buttonCount + linkCount > 0 && !resolved && !isApprovalPrompt(buttons)) {
+  if (buttonCount + linkCount + selectCount > 0 && !resolved && !isApprovalPrompt(buttons)) {
     // Any other component buttons (pagination, menus, link buttons): plain row under the content, always live
     bodyHTML += `<div class="components-row">${buttonsHTML}</div>`;
   } else if (buttonCount > 0 || resolved) {
@@ -1320,7 +1497,7 @@ function createMessageHTML(m, isFollowUp) {
           <span class="approval-title">${authorName} 请求确认</span>
           <span class="approval-state state-${stateKey}">${escapeHTML(stateText)}</span>
         </div>
-        <div class="approval-body">${formattedContent}</div>
+        <div class="approval-body">${formattedContent}${accessoriesHTML}</div>
         <div class="approval-actions ${resolved ? 'resolved' : ''}">${actionsHTML}</div>
       </div>
     `;
@@ -1345,9 +1522,10 @@ function createMessageHTML(m, isFollowUp) {
   }
 
   // Follow-up consecutive message (compact)
+  const rowId = escapeHTML(m.id);
   if (isFollowUp) {
     return `
-      <div class="message-row follow-up">
+      <div class="message-row follow-up" data-msg-id="${rowId}">
         <span class="follow-up-time">${timeStr}</span>
         <div class="message-body">
           ${bodyHTML}
@@ -1359,7 +1537,7 @@ function createMessageHTML(m, isFollowUp) {
 
   // Full message row with avatar
   return `
-    <div class="message-row">
+    <div class="message-row" data-msg-id="${rowId}">
       <div class="message-avatar ${isBot ? 'bot' : ''}" style="${avatarStyle(m.author ? m.author.id : '', isBot)}">${avatarLetter}</div>
       <div class="message-body">
         <div class="message-meta">
@@ -1372,6 +1550,150 @@ function createMessageHTML(m, isFollowUp) {
       </div>
     </div>
   `;
+}
+
+// Message Accessories: attachments and embeds
+// Same rules as the rest of the stream: every string is escaped, every href / src must be http(s) (anything else
+// gets no link and no image), embed text goes through parseMarkdown. Links and images open in the system browser
+// through the native navigation policy (target=_blank). Images load lazily and keep their box size while loading.
+const SELECT_MENU_TYPES = [3, 5, 6, 7, 8]; // string, user, role, mentionable, channel select
+const MAX_EMBEDS = 4;
+const MAX_EMBED_FIELDS = 10;
+const MAX_ATTACHMENTS = 10;
+const IMAGE_MAX = { w: 400, h: 300 };
+const THUMB_MAX = 64;
+
+function safeHttpUrl(url) {
+  const s = String(url == null ? "" : url);
+  return /^https?:\/\/[^\s/]\S*$/i.test(s) ? s : "";
+}
+
+// An image object (attachment, embed image / thumbnail) -> { src, href, width, height }, or null without an http(s) url.
+// src prefers Discord's media proxy; the link opens the original.
+function mediaRef(media) {
+  if (!media || typeof media !== "object") return null;
+  const url = safeHttpUrl(media.url);
+  const proxy = safeHttpUrl(media.proxy_url);
+  if (!url && !proxy) return null;
+  return { src: proxy || url, href: url || proxy, width: media.width, height: media.height };
+}
+
+// Scale (w, h) down into maxW x maxH, keeping the ratio; null when the size is unknown
+function fitBox(w, h, maxW, maxH) {
+  w = Number(w);
+  h = Number(h);
+  if (!(w > 0 && h > 0 && isFinite(w) && isFinite(h))) return null;
+  const k = Math.min(1, maxW / w, maxH / h);
+  return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
+}
+
+function imageLinkHTML(ref, alt, max = IMAGE_MAX, linkClass = "msg-image-link", imgClass = "msg-image") {
+  const box = fitBox(ref.width, ref.height, max.w, max.h);
+  const dims = box ? ` width="${box.w}" height="${box.h}"` : "";
+  return `<a class="${linkClass}" href="${escapeHTML(ref.href)}" target="_blank" rel="noopener noreferrer">` +
+    `<img class="${imgClass}" src="${escapeHTML(ref.src)}" alt="${escapeHTML(alt)}" loading="lazy" decoding="async"${dims}></a>`;
+}
+
+function formatBytes(n) {
+  const b = Number(n);
+  if (!(b >= 0) || !isFinite(b)) return "";
+  if (b < 1024) return `${Math.round(b)} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isImageAttachment(a) {
+  return String(a.content_type || "").toLowerCase().startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(String(a.filename || ""));
+}
+
+// Discord embed color: an integer 0xRRGGBB -> "#rrggbb"; anything else -> "" (the CSS default border)
+function embedColor(color) {
+  return Number.isInteger(color) && color >= 0 && color <= 0xFFFFFF ? "#" + color.toString(16).padStart(6, "0") : "";
+}
+
+// Images as one wrapping row, then one compact row per other file (no autoplay: video / audio are file rows too)
+function attachmentsHTML(list) {
+  const images = [];
+  const files = [];
+  list.slice(0, MAX_ATTACHMENTS).forEach(a => {
+    if (!a || typeof a !== "object") return;
+    const name = String(a.filename || "") || "附件";
+    const ref = mediaRef(a);
+    if (ref && isImageAttachment(a)) {
+      images.push(imageLinkHTML(ref, name));
+      return;
+    }
+    const size = formatBytes(a.size);
+    const link = ref
+      ? `<a class="msg-file-download" href="${escapeHTML(ref.href)}" target="_blank" rel="noopener noreferrer" title="下载" aria-label="下载 ${escapeHTML(name)}">${iconSVG("download", 16)}</a>`
+      : "";
+    files.push(`<div class="msg-file">` +
+      `<span class="msg-file-icon">${iconSVG("file", 20)}</span>` +
+      `<span class="msg-file-text"><span class="msg-file-name" title="${escapeHTML(name)}">${escapeHTML(name)}</span>` +
+      (size ? `<span class="msg-file-size">${size}</span>` : "") + `</span>` +
+      link +
+    `</div>`);
+  });
+  return (images.length ? `<div class="msg-images">${images.join("")}</div>` : "") + files.join("");
+}
+
+// One embed as a quiet card: author, title (linked when http(s)), description, fields (2 columns; inline: false spans
+// both), thumbnail on the right, image, footer + time. video / provider are ignored. A bare image / GIF link
+// (type image / gifv without text) is shown as just the picture.
+function embedHTML(e) {
+  if (!e || typeof e !== "object") return "";
+  const type = String(e.type || "rich");
+  const title = String(e.title || "");
+  const description = String(e.description || "");
+  const fields = (Array.isArray(e.fields) ? e.fields : []).filter(f => f && (f.name || f.value)).slice(0, MAX_EMBED_FIELDS);
+  const image = mediaRef(e.image);
+  const thumb = mediaRef(e.thumbnail);
+
+  if ((type === "image" || type === "gifv") && !title && !description && fields.length === 0) {
+    const pic = image || thumb;
+    return pic ? `<div class="msg-images">${imageLinkHTML(pic, "")}</div>` : "";
+  }
+
+  const parts = [];
+  const authorName = e.author && e.author.name ? String(e.author.name) : "";
+  if (authorName) parts.push(`<div class="embed-author">${escapeHTML(authorName)}</div>`);
+  if (title) {
+    const url = safeHttpUrl(e.url);
+    parts.push(url
+      ? `<div class="embed-title"><a class="msg-link" href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(title)}</a></div>`
+      : `<div class="embed-title">${escapeHTML(title)}</div>`);
+  }
+  if (description) parts.push(`<div class="embed-description">${parseMarkdown(description)}</div>`);
+  if (fields.length > 0) {
+    parts.push(`<div class="embed-fields">${fields.map(f =>
+      `<div class="embed-field${f.inline === true ? "" : " wide"}">` +
+        `<div class="embed-field-name">${escapeHTML(f.name)}</div>` +
+        `<div class="embed-field-value">${parseMarkdown(String(f.value == null ? "" : f.value))}</div>` +
+      `</div>`).join("")}</div>`);
+  }
+  const footerText = e.footer && e.footer.text ? String(e.footer.text) : "";
+  const time = e.timestamp ? fmtTime(e.timestamp) : "";
+  if (parts.length === 0 && !thumb && !image && !footerText && !time) return "";
+
+  const color = embedColor(e.color);
+  let html = `<div class="embed"${color ? ` style="border-left-color:${color}"` : ""}>`;
+  if (parts.length > 0 || thumb) {
+    html += `<div class="embed-top"><div class="embed-main">${parts.join("")}</div>` +
+      (thumb ? imageLinkHTML(thumb, "", { w: THUMB_MAX, h: THUMB_MAX }, "embed-thumb-link", "embed-thumb") : "") + `</div>`;
+  }
+  if (image) html += imageLinkHTML(image, title, IMAGE_MAX, "msg-image-link embed-image-link");
+  if (footerText || time) {
+    html += `<div class="embed-footer">${escapeHTML(footerText)}${footerText && time ? " · " : ""}${time}</div>`;
+  }
+  return html + `</div>`;
+}
+
+// `lead`: the message has no text above, so the block starts right under the author line
+function messageAccessoriesHTML(m, lead) {
+  const files = Array.isArray(m.attachments) ? attachmentsHTML(m.attachments) : "";
+  const embeds = Array.isArray(m.embeds) ? m.embeds.slice(0, MAX_EMBEDS).map(embedHTML).join("") : "";
+  if (!files && !embeds) return "";
+  return `<div class="msg-accessories${lead ? " lead" : ""}">${files}${embeds}</div>`;
 }
 
 // Markdown Parser
@@ -1690,6 +2012,10 @@ window.selectMention = function(index) {
 };
 
 function handleInputKeyDown(e) {
+  // IME composition (Chinese / Japanese / Korean input): Enter and Space confirm candidates there, they never send.
+  // WebKit can deliver the confirming Enter as a plain keydown right after compositionend, hence the short grace period.
+  if (e.isComposing || e.keyCode === 229 || state.composing ||
+      (e.key === "Enter" && Date.now() - (state.compositionEndedAt || 0) < 150)) return;
   if (mentionPopover.style.display !== "none" && state.activeMentionCandidates.length > 0) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -1785,7 +2111,8 @@ function notifyTouchBar() {
 
 window.switchChannelById = function(channelId) {
   const found = state.pinned.find(p => p.id === channelId) ||
-                state.dms.find(d => d.id === channelId);
+                state.dms.find(d => d.id === channelId) ||
+                state.groups.find(g => g.id === channelId); // [WP2 notifications] a clicked notification may come from an unpinned group DM
   if (found) {
     switchChannel(found);
     return;
@@ -1827,6 +2154,97 @@ window.touchBarAction = function(action) {
     messageInput.focus();
   }
 };
+
+// ===== [WP2 notifications] BEGIN: system notifications & Dock badge =====
+// main.m calls window.setAppFocused(true / false) from windowDidBecomeKey: / windowDidResignKey: (and once when the
+// page has loaded). maybeNotify() is only called by the polling paths, with messages that just arrived (never for a
+// channel load, never for ids already shown): while the window is not key or cannot be seen, a message that mentions
+// the current user (or @everyone), any message in a DM / group DM, and any approval prompt posts a system notification
+// (bridge `notify`), and the Dock badge (bridge `setBadge`) counts them until the window is focused again.
+state.focused = document.hasFocus();
+state.unreadNotified = 0;
+const NOTIFY_MAX_PER_TICK = 5;
+const NOTIFY_BODY_CHARS = 140;
+
+window.setAppFocused = function(f) {
+  state.focused = !!f;
+  if (f) {
+    state.unreadNotified = 0;
+    callNative("setBadge", { count: 0 });
+  }
+};
+
+// Messages of `list` newer than `sinceId` that `prevShown` (the list shown before the re-render) did not contain
+function arrivedSince(list, sinceId, prevShown) {
+  if (!sinceId || !Array.isArray(list)) return [];
+  const shown = new Set((prevShown || []).map(m => m.id));
+  return list.filter(m => m && m.id && compareSnowflakes(m.id, sinceId) > 0 && !shown.has(m.id));
+}
+
+function maybeNotify(newMessages) {
+  if (state.focused && state.visibility !== "hidden") return;
+  const me = state.currentUser;
+  const ch = state.activeChannel || {};
+  const type = notifChannelType(ch);
+  const direct = type === 1 || type === 3;
+  const wanted = (newMessages || []).filter(m => {
+    if (!m || !m.id || !m.author || (me && m.author.id === me.id)) return false;
+    const mentioned = !!m.mention_everyone || !!(me && (m.mentions || []).some(u => u && u.id === me.id));
+    return mentioned || direct || notifIsApproval(m);
+  });
+  if (wanted.length === 0) return;
+  state.unreadNotified += wanted.length; // the badge counts every one of them; banners are capped per poll tick
+  callNative("setBadge", { count: state.unreadNotified });
+  const where = direct ? "" : ` · #${String(ch.name || "").replace(/^[#⭐👥👤🧵\s]+/u, "")}`;
+  // The newest few, posted oldest first so the latest one ends up on top
+  [...wanted].sort((a, b) => compareSnowflakes(b.id, a.id)).slice(0, NOTIFY_MAX_PER_TICK).reverse().forEach(m => {
+    callNative("notify", { title: notifUserName(m.author.id, m.author) + where, body: notifBody(m), channelId: ch.id, tag: m.id });
+  });
+}
+
+// Pinned entries saved by older versions may lack the type: the DM lists have it (same rule as getMentionTargets)
+function notifChannelType(ch) {
+  if (ch.type !== undefined || ch.isThread) return ch.type;
+  const dm = state.groups.find(g => g.id === ch.id) || state.dms.find(d => d.id === ch.id);
+  return dm ? dm.type : undefined;
+}
+
+function notifIsApproval(m) {
+  const buttons = [];
+  (m.components || []).forEach(row => (row.components || []).forEach(b => { if (b && b.style !== 5) buttons.push(b); }));
+  return buttons.some(b => !b.disabled) && isApprovalPrompt(buttons);
+}
+
+// Display name, resolved like the message list does (KNOWN_BOTS, then known users, then the user object itself)
+function notifUserName(id, user) {
+  const known = KNOWN_BOTS[id] || state.knownUsers[id];
+  if (known && known.name) return String(known.name);
+  return String((user && (user.global_name || user.username)) || id);
+}
+
+// Plain text (never HTML: the native side shows it as is), mention tags turned into @name, cut to 140 characters
+function notifBody(m) {
+  const mentions = m.mentions || [];
+  const text = String(m.content || "")
+    .replace(/<@!?(\d+)>/g, (s, id) => "@" + notifUserName(id, mentions.find(u => u && u.id === id)))
+    .replace(/<@&(\d+)>/g, (s, id) => "@" + (KNOWN_ROLES[id] || "Role"))
+    .replace(/<#(\d+)>/g, (s, id) => "#" + notifChannelName(id))
+    .replace(/<a?:(\w+):\d+>/g, ":$1:")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return notifIsApproval(m) ? "[审批请求]" : "[附件]";
+  const chars = Array.from(text);
+  return chars.length > NOTIFY_BODY_CHARS ? chars.slice(0, NOTIFY_BODY_CHARS).join("") + "…" : text;
+}
+
+function notifChannelName(id) {
+  for (const sId in state.channelsCache) {
+    const c = state.channelsCache[sId].find(x => x.id === id);
+    if (c) return c.name.replace(/^[#⭐👥👤🧵\s]+/u, "");
+  }
+  return id;
+}
+// ===== [WP2 notifications] END =====
 
 // Utilities
 // Local wall-clock HH:MM for an ISO timestamp (or a Date)
