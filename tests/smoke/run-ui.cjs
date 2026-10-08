@@ -111,7 +111,9 @@ const EVIL_NAME = "O'Brien \"<b>\" &amp;";
 
   // copy button
   await page.click(".btn-copy");
-  check("copy: delegated copy button gives feedback", (await page.$eval(".btn-copy span", e => e.innerText)) === "已复制");
+  // the feedback follows the clipboard promise (writeText or the execCommand fallback): wait for it instead of reading at once
+  const copied = await page.waitForFunction(() => document.querySelector(".btn-copy span")?.innerText === "已复制", null, { timeout: 3000 }).then(() => true).catch(() => false);
+  check("copy: delegated copy button gives feedback", copied, await page.$eval(".btn-copy span", e => e.innerText));
 
   // thread card: keyboard accessible button, hostile name
   check("thread card: is a <button type=button> and focusable", await page.$$eval(".message-thread-card", els => els.length === 2 && els.every(e => e.tagName === "BUTTON" && e.type === "button" && e.tabIndex === 0)));
