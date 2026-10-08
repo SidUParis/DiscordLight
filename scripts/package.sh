@@ -49,6 +49,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 # ---------- build ----------
 export MACOSX_DEPLOYMENT_TARGET="$MIN_OS"
+# The clang wrapper below calls the real compiler directly, bypassing the /usr/bin shim that normally sets the SDK;
+# without SDKROOT it cannot even find <Cocoa/Cocoa.h>
+export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path)}"
 ARCHS="${ARCHS-arm64 x86_64}"
 echo "==> Building $APP $TAG (archs: ${ARCHS:-host}, macOS >= $MIN_OS)"
 if [[ -n "$ARCHS" ]]; then
@@ -56,7 +59,7 @@ if [[ -n "$ARCHS" ]]; then
   ARCH_FLAGS=""
   for a in $ARCHS; do ARCH_FLAGS+=" -arch $a"; done
   mkdir -p "$WORK/bin"
-  printf '#!/bin/sh\nexec "%s"%s "$@"\n' "$REAL_CLANG" "$ARCH_FLAGS" > "$WORK/bin/clang"
+  printf '#!/bin/sh\nexec "%s" -isysroot "%s"%s "$@"\n' "$REAL_CLANG" "$SDKROOT" "$ARCH_FLAGS" > "$WORK/bin/clang"
   chmod +x "$WORK/bin/clang"
   PATH="$WORK/bin:$PATH" make clean build
 else
