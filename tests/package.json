@@ -1,0 +1,14 @@
+{
+  "name": "discordlight-smoke-tests",
+  "private": true,
+  "description": "Dev-only headless smoke tests for the DiscordLight web front end (mocked native bridge). Never shipped in the app bundle.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node smoke/run-all.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.0"
+  }
+}

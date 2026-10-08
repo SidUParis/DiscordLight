@@ -43,7 +43,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 }
 @end
 
-@interface AppDelegate : NSResponder <NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSTouchBarDelegate>
+@interface AppDelegate : NSResponder <NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSTouchBarDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) NSString *token;
@@ -168,6 +168,8 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
     self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     self.window.titlebarAppearsTransparent = YES;
     self.window.titleVisibility = NSWindowTitleHidden;
+    self.window.delegate = self; // occlusion changes set the web layer's poll interval (windowDidChangeOcclusionState:)
+    self.window.releasedWhenClosed = NO; // the delegate keeps a strong reference; required under ARC
     [self.window center];
 
     self.webView = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:webConfig];
@@ -256,7 +258,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 - (void)respondToJS:(NSString *)callback data:(NSDictionary *)data {
     // The callback name is spliced into the script as an identifier, so it may only be letters, digits and "_"
     // (callNative() in app.js generates "cb_" + base36).
-    // NOTE: the Makefile compiles without -fobjc-arc, so never cache autoreleased objects in statics here.
+    // NOTE: built with -fobjc-arc (see Makefile); keep it that way, the file has no manual retain/release.
     NSCharacterSet *notIdentifier = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
     if (callback.length == 0 || [callback rangeOfCharacterFromSet:notIdentifier].location != NSNotFound) return;
 
@@ -342,6 +344,12 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         NSString *channelId = SafeString(body[@"channelId"]);
         int limit = [body[@"limit"] intValue] ?: 30;
         NSString *url = [NSString stringWithFormat:@"https://discord.com/api/v10/channels/%@/messages?limit=%d", channelId, limit];
+        // Incremental poll: only messages newer than this snowflake id. ASCII digits only, anything else is ignored.
+        NSString *after = SafeString(body[@"after"]);
+        NSCharacterSet *notDigit = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet];
+        if (after.length > 0 && after.length <= 20 && [after rangeOfCharacterFromSet:notDigit].location == NSNotFound) {
+            url = [url stringByAppendingFormat:@"&after=%@", after];
+        }
         NSMutableURLRequest *req = [self requestWithURLString:url method:@"GET"];
         [[self.session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             id obj = (data && !err) ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
@@ -731,6 +739,28 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     return YES;
+}
+
+#pragma mark - Visibility (poll interval)
+
+// The web layer polls every 2.5 s while the window can be seen and every 15 s otherwise (app.js setAppVisible)
+- (void)notifyWebVisible:(BOOL)visible {
+    NSString *js = [NSString stringWithFormat:@"window.setAppVisible && window.setAppVisible(%@);", visible ? @"true" : @"false"];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
+}
+
+- (void)windowDidChangeOcclusionState:(NSNotification *)notification {
+    BOOL visible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    [self notifyWebVisible:visible];
+}
+
+- (void)applicationDidHide:(NSNotification *)notification {
+    [self notifyWebVisible:NO];
+}
+
+- (void)applicationDidUnhide:(NSNotification *)notification {
+    // A window left in the Dock stays hidden after unhide (its occlusion state does not change then)
+    [self notifyWebVisible:![self.window isMiniaturized]];
 }
 @end
 

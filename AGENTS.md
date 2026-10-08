@@ -25,3 +25,5 @@ Before making changes to this project, any AI agent must:
 3. Keep frontend code in clean, vanilla ES6+ (no heavy npm build steps or frameworks).
 4. Run pre-commit security audits to guarantee zero token or credential leaks.
 5. Rebuild and install using `make build && make install` to verify packaging.
+6. `src/main.m` is compiled with `-fobjc-arc` (see Makefile). Keep it that way: no manual `retain`/`release`/`autorelease`, use `__bridge`/`CFRelease` for Core Foundation objects, and keep `self.window.releasedWhenClosed = NO`. See HANDOVER.md §3.7.
+7. After any front-end change (`web/`), run `make test` (headless smoke tests in `tests/`, mocked native bridge) and make sure every suite passes. `tests/` is dev-only (its npm dependency never reaches the app bundle).

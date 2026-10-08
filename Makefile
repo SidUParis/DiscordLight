@@ -9,7 +9,7 @@ all: build
 build:
 	@echo "Building $(APP_NAME)..."
 	@mkdir -p $(MACOS) $(RESOURCES)/web
-	clang -fmodules -framework Cocoa -framework WebKit -O2 -o $(MACOS)/$(APP_NAME) src/main.m
+	clang -fmodules -fobjc-arc -framework Cocoa -framework WebKit -O2 -Wall -o $(MACOS)/$(APP_NAME) src/main.m
 	cp src/Info.plist $(CONTENTS)/Info.plist
 	cp assets/AppIcon.icns $(RESOURCES)/AppIcon.icns
 	cp assets/touchbar_icon.png $(RESOURCES)/touchbar_icon.png
@@ -25,4 +25,7 @@ install: build
 clean:
 	rm -rf $(BUNDLE)
 
-.PHONY: all build install clean
+test:
+	cd tests && npm test
+
+.PHONY: all build install clean test

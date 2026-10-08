@@ -28,3 +28,7 @@ config.json
 .idea/
 *.swp
 *~
+
+# Dev-only smoke tests (tests/)
+node_modules/
+tests/smoke/.shots/

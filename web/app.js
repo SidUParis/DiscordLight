@@ -117,7 +117,14 @@ const state = {
   mentionIndex: 0,
   activeMentionCandidates: [],
   resolvedInteractions: {}, // messageId -> { label, time, customId } for approvals answered in this session
-  ui: { collapsed: [] }     // Sidebar section keys the user has collapsed; persisted as config.ui
+  ui: { collapsed: [] },    // Sidebar section keys the user has collapsed; persisted as config.ui
+  // Message polling (see schedulePoll / pollMessages)
+  visibility: document.hidden ? "hidden" : "active", // "hidden": window occluded, minimized or app hidden
+  pollTimer: null,  // pending poll tick; null while polling is not running (token modal, init not done)
+  polling: false,   // a poll request is in flight: ticks are skipped until it answers
+  pollCount: 0,     // polls made in the current channel; every RESYNC_EVERY-th one re-reads the newest messages
+  pollGen: 0,       // bumped on channel switch, so an answer for the previous channel is dropped
+  resyncDue: false  // the next poll re-reads the newest messages (set when the window comes back)
 };
 
 // Sidebar sections, top to bottom: 常用关注 / 群聊与私信 / 服务器
@@ -231,8 +238,8 @@ async function init() {
   notifyTouchBar();
   loadMessages();
 
-  // Polling loop (every 2.5s)
-  setInterval(pollMessages, 2500);
+  // Polling loop: every 2.5 s while the window is visible, every 15 s while it is hidden
+  schedulePoll();
 }
 
 // Event Bindings
@@ -345,6 +352,9 @@ function bindEvents() {
 
   if (pinToggleBtn) pinToggleBtn.addEventListener("click", togglePinCurrentChannel);
   if (sendBtn) sendBtn.addEventListener("click", handleSendMessage);
+
+  // Fallback for the native occlusion / hide signal (main.m calls window.setAppVisible): the page's own visibility
+  document.addEventListener("visibilitychange", () => window.setAppVisible(!document.hidden));
 
   // Mention Autocomplete & Keyboard Handling
   if (messageInput) {
@@ -677,6 +687,7 @@ function switchChannel(channel) {
   messagesList.innerHTML = `<div class="state-empty">正在载入 ${namePrefix}${escapeHTML(channel.name.replace(/^[#⭐👥👤🧵\s]+/u, ""))}…</div>`;
   state.lastMessageId = null;
   state.messages = [];
+  resetPolling();
   notifyTouchBar();
   loadMessages();
   callNative("saveConfig", { last_channel_id: channel.id });
@@ -702,6 +713,7 @@ window.openThread = function(threadId, threadName, replyCount, optParent) {
   messagesList.innerHTML = `<div class="state-empty">正在载入线程【${escapeHTML(threadName)}】…</div>`;
   state.lastMessageId = null;
   state.messages = [];
+  resetPolling();
   notifyTouchBar();
   loadMessages();
 };
@@ -972,27 +984,177 @@ function setStatus(text, type = "green") {
   }
 }
 
+// Idle status text: says when polling has slowed down because the window cannot be seen
+const STATUS_CONNECTED = "已连接";
+const STATUS_CONNECTED_HIDDEN = "已连接 · 后台低频";
+
+function setConnectedStatus() {
+  setStatus(state.visibility === "hidden" ? STATUS_CONNECTED_HIDDEN : STATUS_CONNECTED, "green");
+}
+
 // Messages Loading & Rendering
 async function loadMessages() {
   if (!state.activeChannel.id) return;
-  const res = await callNative("fetchMessages", { channelId: state.activeChannel.id, limit: 40 });
+  const channelId = state.activeChannel.id;
+  const res = await callNative("fetchMessages", { channelId, limit: 40 });
+  if (channelId !== state.activeChannel.id) return; // switched away while loading: this answer is for another channel
   if (res && res.messages) {
-    setStatus("已连接", "green");
+    setConnectedStatus();
     renderMessages(res.messages);
   } else {
     setStatus("加载失败", "red");
   }
 }
 
-async function pollMessages() {
-  if (!state.activeChannel.id) return;
-  const res = await callNative("fetchMessages", { channelId: state.activeChannel.id, limit: 15 });
-  if (res && res.messages && res.messages.length > 0) {
-    const topId = res.messages[0].id;
-    if (topId !== state.lastMessageId) {
-      renderMessages(res.messages);
-    }
+// Message polling. Idle cost is what matters here: a poll asks only for messages newer than the newest one shown
+// (`after`), which is an empty array almost every time, so nothing is parsed or re-rendered. `after` cannot see
+// edits (a bot disabling its approval buttons, a thread's reply count), so every RESYNC_EVERY-th poll re-reads the
+// newest RESYNC_LIMIT messages and re-renders only if something in them changed.
+const POLL_MS = { active: 2500, hidden: 15000 };
+const POLL_AFTER_LIMIT = 50;
+const RESYNC_LIMIT = 15;
+const RESYNC_EVERY = 12;
+const MAX_MESSAGES = 100;
+
+function pollInterval() {
+  const key = state.visibility === "hidden" ? "hidden" : "active";
+  const override = window.__DL_POLL_MS; // test harness only; undefined in the app
+  const ms = override ? Number(override[key]) : NaN;
+  return ms > 0 ? ms : POLL_MS[key];
+}
+
+// One timer at a time; nothing is scheduled while the token modal is up
+function schedulePoll() {
+  clearTimeout(state.pollTimer);
+  state.pollTimer = null;
+  if (tokenModal && tokenModal.style.display !== "none") return;
+  state.pollTimer = setTimeout(() => {
+    state.pollTimer = null;
+    pollMessages();
+    schedulePoll();
+  }, pollInterval());
+}
+
+// Called by main.m (window occlusion, app hide / unhide) and by the visibilitychange fallback
+window.setAppVisible = function(visible) {
+  const next = visible ? "active" : "hidden";
+  if (state.visibility === next) return;
+  state.visibility = next;
+  if (statusIndicator.title === STATUS_CONNECTED || statusIndicator.title === STATUS_CONNECTED_HIDDEN) setConnectedStatus();
+  if (state.pollTimer === null) return; // polling not running (token modal, or init still loading)
+  if (next === "active") {
+    // Back in front: poll now instead of waiting out the slow timer, and re-read the newest messages so edits made
+    // while hidden show at once (if a request is still in flight, the next tick does it)
+    state.resyncDue = true;
+    pollMessages();
   }
+  schedulePoll();
+};
+
+// A channel switch starts polling over; an answer still in flight belongs to the previous channel
+function resetPolling() {
+  state.pollGen++;
+  state.polling = false;
+  state.pollCount = 0;
+  state.resyncDue = false;
+  if (state.pollTimer !== null) schedulePoll(); // first poll one interval after the switch, not mid-load
+}
+
+async function pollMessages() {
+  const channelId = state.activeChannel.id;
+  if (!channelId || state.polling) return;
+  const gen = state.pollGen;
+  state.polling = true;
+  try {
+    state.pollCount++;
+
+    // Nothing shown yet (empty channel, or the first load still running): the old full poll
+    if (!state.lastMessageId) {
+      const res = await callNative("fetchMessages", { channelId, limit: RESYNC_LIMIT });
+      if (gen !== state.pollGen) return;
+      if (res && res.messages && res.messages.length > 0 && res.messages[0].id !== state.lastMessageId) {
+        renderMessages(res.messages);
+      }
+      return;
+    }
+
+    // Periodic re-read of the newest messages: catches edits, deletions and reply counts that `after` cannot see
+    if (state.resyncDue || state.pollCount % RESYNC_EVERY === 0) {
+      state.resyncDue = false;
+      const shownTop = state.lastMessageId; // anything newer that is shown when the answer comes was loaded meanwhile
+      const res = await callNative("fetchMessages", { channelId, limit: RESYNC_LIMIT });
+      if (gen !== state.pollGen || !res || !Array.isArray(res.messages) || res.messages.length === 0) return;
+      const latest = res.messages;
+      if (latest.length >= RESYNC_LIMIT && compareSnowflakes(latest[latest.length - 1].id, state.lastMessageId) > 0) {
+        // So many new messages that the re-read does not reach the newest one shown: there may be a gap in between
+        await pollReloadNewest(channelId, gen);
+        return;
+      }
+      const merged = mergeLatest(latest, shownTop);
+      if (merged[0].id !== state.lastMessageId || messagesSignature(merged) !== messagesSignature(state.messages)) {
+        renderMessages(merged);
+      }
+      return;
+    }
+
+    // Incremental poll: only messages newer than the newest one shown (newest first, like a full fetch)
+    const res = await callNative("fetchMessages", { channelId, limit: POLL_AFTER_LIMIT, after: state.lastMessageId });
+    if (gen !== state.pollGen || !res || !Array.isArray(res.messages) || res.messages.length === 0) return;
+
+    if (res.messages.length >= POLL_AFTER_LIMIT) {
+      // A full page (e.g. after the Mac slept): more may be missing beyond it
+      await pollReloadNewest(channelId, gen);
+      return;
+    }
+
+    const known = new Set(state.messages.map(m => m.id));
+    const fresh = res.messages.filter(m => m && m.id && !known.has(m.id));
+    if (fresh.length === 0) return;
+    renderMessages([...fresh, ...state.messages].slice(0, MAX_MESSAGES)); // sets state.messages / lastMessageId
+  } finally {
+    if (gen === state.pollGen) state.polling = false;
+  }
+}
+
+// More new messages than one poll answer covers: show the newest ones, like a channel load
+async function pollReloadNewest(channelId, gen) {
+  const res = await callNative("fetchMessages", { channelId, limit: 40 });
+  if (gen === state.pollGen && res && Array.isArray(res.messages) && res.messages.length > 0) {
+    renderMessages(res.messages);
+  }
+}
+
+// The re-read newest messages replace what is shown for their id range. Shown messages inside that range that the
+// re-read no longer contains were deleted; older ones are kept. Shown messages newer than the re-read were deleted
+// too (it is the newest of the channel), unless they are newer than `shownTop` (the top when the re-read was asked):
+// a load that answered while the re-read was in flight added those, so they are kept.
+function mergeLatest(latest, shownTop) {
+  const ids = new Set(latest.map(m => m.id));
+  const newestId = latest[0].id;
+  const oldestId = latest[latest.length - 1].id;
+  const wholeChannel = latest.length < RESYNC_LIMIT; // fewer than asked for: there is nothing older
+  const newer = state.messages.filter(m => !ids.has(m.id) && compareSnowflakes(m.id, newestId) > 0 && compareSnowflakes(m.id, shownTop) > 0);
+  const older = wholeChannel ? [] : state.messages.filter(m => !ids.has(m.id) && compareSnowflakes(m.id, oldestId) < 0);
+  return [...newer, ...latest, ...older].slice(0, MAX_MESSAGES);
+}
+
+// Snowflake ids are decimal strings without leading zeros: a longer one is larger, equal lengths compare as text
+function compareSnowflakes(a, b) {
+  a = String(a);
+  b = String(b);
+  if (a.length !== b.length) return a.length - b.length;
+  return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+// What a re-render would change: ids and their order, edits, button disabled flags, thread cards
+function messagesSignature(messages) {
+  return messages.map(m => {
+    const buttons = (m.components || []).map(row =>
+      (row.components || []).map(c => `${c.custom_id || c.url || ""}:${c.disabled ? 1 : 0}`).join(",")
+    ).join(";");
+    const thread = m.thread ? `${m.thread.id}:${m.thread.message_count || 0}:${m.thread.name || ""}` : "";
+    return `${m.id}|${m.edited_timestamp || ""}|${buttons}|${thread}`;
+  }).join("\n");
 }
 
 function renderMessages(messages) {
@@ -1612,7 +1774,7 @@ async function handleSendMessage() {
 
   sendBtn.disabled = false;
   if (res && res.success) {
-    setStatus("已连接", "green");
+    setConnectedStatus();
     loadMessages();
   } else {
     setStatus("发送失败", "red");

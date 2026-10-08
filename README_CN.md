@@ -12,6 +12,7 @@
   - 内存常驻 **< 80 MB**（对比官方客户端动辄 1.5GB+）。
   - 空闲状态 CPU 占用稳定为 **0%**，极大延长 MacBook 续航，拒绝发热。
   - 原生 macOS 深色界面（Graphite Console）：单色描边图标、面向智能体的审批卡片。
+  - 增量轮询 + 后台降频：每次轮询只请求比当前最新消息更新的内容（没有新消息时不做任何 DOM 工作），窗口被隐藏或遮挡时间隔从 2.5 秒降到 15 秒。
 
 - **🎛 深度优化 Touch Bar**
   - **常驻 `@ 智能体` 抽屉（Popover）**：完美解决输入文字时拼音输入法候选栏挤占 Touch Bar 的难题。输入任何文字时，随时轻点 `@ 智能体` 展开频道内所有 Bot，点按即插入艾特并无缝恢复输入法候选。
@@ -56,6 +57,10 @@ make build
 make install
 ```
 
+也可以在 Finder 里双击 `scripts/build-and-run.command`：自动构建、安装并重新启动应用（日志在 `scripts/last-build.log`）。
+
+运行冒烟测试（仅开发用，需要 Node ≥ 18；首次先执行 `cd tests && npm install && npx playwright install chromium`）：`make test`。测试使用假的原生 bridge，不会访问 Discord，详见 [tests/README.md](./tests/README.md)。
+
 ### 2. 配置 Token
 
 DiscordLight 支持两种安全凭据注入方式：
@@ -73,18 +78,27 @@ DiscordLight 支持两种安全凭据注入方式：
 
 ```
 DiscordLight/
-├── Makefile                 # 一键构建与安装命令
+├── Makefile                 # 构建 / 安装 / 清理 / 测试命令
 ├── build.sh                 # 构建脚本
+├── scripts/
+│   ├── build-and-run.command  # 双击即构建、安装并重启应用
+│   └── run-debug.command      # 前台运行 90 秒采样内存/CPU，抓崩溃报告
 ├── src/
 │   ├── main.m               # Cocoa 原生宿主、WKWebView 桥接与 NSTouchBar 控制器
 │   └── Info.plist           # macOS 应用元数据
 ├── web/
 │   ├── index.html           # 前端 DOM 结构
 │   ├── style.css            # Graphite Console 主题样式表（原生 macOS 深色）
-│   └── app.js               # 客户端逻辑、真实组件交互与 @ 补全
-└── assets/
-    ├── AppIcon.icns         # 原生圆角应用图标
-    └── touchbar_icon.png    # 单色 Touch Bar 图标
+│   └── app.js               # 客户端逻辑、轮询、真实组件交互与 @ 补全
+├── assets/
+│   ├── AppIcon.icns         # 应用图标（原创：石墨色圆角方块 + 琥珀色闪电）
+│   ├── AppIcon.png          # 1024 像素图标母版
+│   ├── touchbar_icon.png    # Touch Bar 图标
+│   └── make_icon.py         # 重新生成图标文件（Pillow + numpy）
+└── tests/                   # 仅开发用的无头冒烟测试（不会打进 App）
+    ├── package.json         # 唯一的 devDependency：playwright
+    ├── README.md
+    └── smoke/               # run-all.cjs 与各测试套件、共用的假 bridge
 ```
 
 ---
