@@ -10,11 +10,12 @@
 | :--- | :--- | :--- |
 | `ui` | `smoke/run-ui.cjs` | 侧栏三个分组、折叠与持久化、服务器选择器、`⌘K` / `⌘F` 搜索、注入防护（转义、自动链接、`data-act` 委托）、审批卡片、线程卡片、Touch Bar payload、空状态 / 加载中 / 首次引导 |
 | `links` | `smoke/run-links.cjs` | 搜索快捷键只认 Command；链接按钮（style 5）只接受 http(s)、不触发交互 |
+| `mentions` | `smoke/run-mentions.cjs` | 智能体与群聊成员分开：`updateTouchBar` 的 `bots` / `members`、输入框芯片（智能体、分隔线、成员）；`KNOWN_BOTS` 兜底只在服务器频道；关注列表里的群聊条目 |
 | `polling` | `smoke/run-polling.cjs` | 轻量轮询：`after` 增量轮询、每 12 次的 resync、前台 / 后台间隔、同一时间只有一个轮询、切换频道丢弃旧回答、大量新消息时整页重载、payload 不变 |
 | `polling-edge` | `smoke/run-polling-edge.cjs` | 轮询边界：新消息到达时的滚动位置、`after` 与重载竞争时去重、线程回复数变化只重绘一次、最新消息被删除 |
 | `fuzz-markdown` | `smoke/fuzz-markdown.cjs` | 30000 条随机恶意输入喂给 `parseMarkdown`，输出只能包含解析器自己生成的标记 |
 
-`smoke/mock-bridge.cjs` 是 `ui` / `links` / `fuzz-markdown` 共用的假 bridge；两个轮询套件需要数字 snowflake id 和支持 `after` 的 `fetchMessages`，各自带了自己的 mock。`smoke/harness.cjs` 负责加载 Playwright、解析 web 目录和输出 PASS / FAIL。
+`smoke/mock-bridge.cjs` 是 `ui` / `links` / `mentions` / `fuzz-markdown` 共用的假 bridge（`links` 和 `mentions` 在它之后覆盖个别 action）；两个轮询套件需要数字 snowflake id 和支持 `after` 的 `fetchMessages`，各自带了自己的 mock。`smoke/harness.cjs` 负责加载 Playwright、解析 web 目录和输出 PASS / FAIL。
 
 ## 怎么运行
 

@@ -21,6 +21,8 @@ static NSTouchBarItemIdentifier const TBItemIdentifierChannelTitle = @"com.disco
 static NSTouchBarItemIdentifier const TBItemIdentifierAgentsPopover = @"com.discordlight.touchbar.agents_popover";
 static NSString * const TBItemIdentifierPopoverBotPrefix = @"com.discordlight.touchbar.popover.bot";
 static NSString * const TBItemIdentifierBotPrefix = @"com.discordlight.touchbar.bot";
+static NSTouchBarItemIdentifier const TBItemIdentifierMembersPopover = @"com.discordlight.touchbar.members_popover";
+static NSString * const TBItemIdentifierPopoverMemberPrefix = @"com.discordlight.touchbar.popover.member";
 static NSTouchBarItemIdentifier const TBItemIdentifierChannelsPopover = @"com.discordlight.touchbar.channels_popover";
 static NSString * const TBItemIdentifierPopoverPinPrefix = @"com.discordlight.touchbar.popover.pin";
 static NSString * const TBItemIdentifierPinPrefix = @"com.discordlight.touchbar.pin";
@@ -53,6 +55,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
 @property (nonatomic, strong) NSString *currentChannelId;
 @property (nonatomic, strong) NSString *currentChannelName;
 @property (nonatomic, strong) NSArray *currentBots;
+@property (nonatomic, strong) NSArray *currentMembers;
 @property (nonatomic, strong) NSArray *currentPinned;
 @property (nonatomic, strong) NSMutableDictionary *channelGuildCache;
 @end
@@ -445,6 +448,7 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         self.currentChannelId = SafeString(body[@"channelId"]);
         self.currentChannelName = SafeString(body[@"channelName"]);
         self.currentBots = [body[@"bots"] isKindOfClass:[NSArray class]] ? body[@"bots"] : @[];
+        self.currentMembers = [body[@"members"] isKindOfClass:[NSArray class]] ? body[@"members"] : @[];
         self.currentPinned = [body[@"pinned"] isKindOfClass:[NSArray class]] ? body[@"pinned"] : @[];
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -532,6 +536,11 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         [identifiers addObject:[NSString stringWithFormat:@"%@.0", TBItemIdentifierBotPrefix]];
     }
 
+    // 3b. Group DM Members Popover (humans only, kept apart from the agents)
+    if (self.currentMembers.count > 0) {
+        [identifiers addObject:TBItemIdentifierMembersPopover];
+    }
+
     // 4. System Input Method Candidate List (Chinese / Pinyin / English autocorrect)
     [identifiers addObject:NSTouchBarItemIdentifierCandidateList];
 
@@ -604,6 +613,38 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
             NSButton *btn = [NSButton buttonWithTitle:[NSString stringWithFormat:@"@%@", botName]
                                                target:self
                                                action:@selector(touchBarPopoverBotClicked:)];
+            btn.tag = index;
+            btn.bezelStyle = NSBezelStyleRounded;
+            item.view = btn;
+            return item;
+        }
+    }
+    else if ([identifier isEqualToString:TBItemIdentifierMembersPopover]) {
+        // Expandable Sub-TouchBar with the human members of a group DM
+        NSPopoverTouchBarItem *popover = [[NSPopoverTouchBarItem alloc] initWithIdentifier:identifier];
+        popover.collapsedRepresentationLabel = [NSString stringWithFormat:@"@ 成员 (%lu)", (unsigned long)self.currentMembers.count];
+        popover.showsCloseButton = YES;
+
+        NSTouchBar *subBar = [[NSTouchBar alloc] init];
+        subBar.delegate = self;
+        NSMutableArray *subIds = [NSMutableArray array];
+        for (NSUInteger i = 0; i < self.currentMembers.count; i++) {
+            [subIds addObject:[NSString stringWithFormat:@"%@.%lu", TBItemIdentifierPopoverMemberPrefix, (unsigned long)i]];
+        }
+        subBar.defaultItemIdentifiers = subIds;
+        popover.popoverTouchBar = subBar;
+        return popover;
+    }
+    else if ([identifier hasPrefix:TBItemIdentifierPopoverMemberPrefix]) {
+        NSString *indexStr = [identifier substringFromIndex:TBItemIdentifierPopoverMemberPrefix.length + 1];
+        NSUInteger index = [indexStr integerValue];
+        if (index < self.currentMembers.count) {
+            NSDictionary *member = self.currentMembers[index];
+            NSString *memberName = SafeString(member[@"name"]);
+            NSCustomTouchBarItem *item = [[NSCustomTouchBarItem alloc] initWithIdentifier:identifier];
+            NSButton *btn = [NSButton buttonWithTitle:[NSString stringWithFormat:@"@%@", memberName]
+                                               target:self
+                                               action:@selector(touchBarPopoverMemberClicked:)];
             btn.tag = index;
             btn.bezelStyle = NSBezelStyleRounded;
             item.view = btn;
@@ -706,6 +747,24 @@ static NSTouchBarItemIdentifier const TBItemIdentifierRefresh = @"com.discordlig
         NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar(%@);", [self jsStringLiteral:botName]];
         [self.webView evaluateJavaScript:js completionHandler:nil];
         
+        // Auto-close popover to return to typing & IME
+        [self.window.touchBar.itemIdentifiers enumerateObjectsUsingBlock:^(NSTouchBarItemIdentifier ident, NSUInteger i, BOOL *stop) {
+            NSTouchBarItem *item = [self.window.touchBar itemForIdentifier:ident];
+            if ([item isKindOfClass:[NSPopoverTouchBarItem class]]) {
+                [(NSPopoverTouchBarItem *)item dismissPopover:sender];
+            }
+        }];
+    }
+}
+
+- (void)touchBarPopoverMemberClicked:(NSButton *)sender {
+    NSUInteger idx = sender.tag;
+    if (idx < self.currentMembers.count) {
+        NSDictionary *member = self.currentMembers[idx];
+        NSString *memberName = SafeString(member[@"name"]);
+        NSString *js = [NSString stringWithFormat:@"window.insertMentionFromTouchBar && window.insertMentionFromTouchBar(%@);", [self jsStringLiteral:memberName]];
+        [self.webView evaluateJavaScript:js completionHandler:nil];
+
         // Auto-close popover to return to typing & IME
         [self.window.touchBar.itemIdentifiers enumerateObjectsUsingBlock:^(NSTouchBarItemIdentifier ident, NSUInteger i, BOOL *stop) {
             NSTouchBarItem *item = [self.window.touchBar itemForIdentifier:ident];

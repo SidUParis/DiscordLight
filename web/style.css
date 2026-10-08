@@ -1377,6 +1377,16 @@ a.btn-component:focus-visible {
   border-radius: 4px;
 }
 
+/* Hairline between the agent chips and the group DM member chips */
+.agent-chip-sep {
+  background: var(--line-strong);
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  flex: none;
+  align-self: center;
+}
+
 .input-hint {
   font-size: 11px;
   color: var(--text-2);

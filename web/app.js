@@ -778,95 +778,84 @@ function updateHeader() {
   updateAgentChips();
 }
 
-// Quick Agent / Member Chips Bar
+// Quick Agent / Member Chips Bar: agents first (rounded-square avatars), then group DM members (round avatars)
 function updateAgentChips() {
   if (!inputAgentChips) return;
   inputAgentChips.innerHTML = "";
 
-  const chips = getChannelBots();
-  if (chips.length === 0) {
+  const { bots, members } = getMentionTargets();
+  if (bots.length === 0 && members.length === 0) {
     inputAgentChips.style.display = "none";
     return;
   }
 
   inputAgentChips.style.display = "flex";
-  chips.forEach(item => {
+  const addChip = (item, isBot) => {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "agent-chip";
-    const isBot = isBotId(item.id);
     chip.innerHTML = `
-      <span class="agent-chip-avatar ${isBot ? 'bot' : ''}" style="${avatarStyle(item.id, isBot)}">${escapeHTML(((item.name || "")[0] || "U").toUpperCase())}</span>
+      <span class="agent-chip-avatar${isBot ? " bot" : ""}" style="${avatarStyle(item.id, isBot)}">${escapeHTML((Array.from(item.name || "")[0] || "U").toUpperCase())}</span>
       <span>@${escapeHTML(item.name)}</span>
     `;
     chip.addEventListener("click", () => {
       insertMentionFromTouchBar(item.name);
     });
     inputAgentChips.appendChild(chip);
-  });
+  };
+  bots.forEach(item => addChip(item, true));
+  if (bots.length > 0 && members.length > 0) {
+    const sep = document.createElement("span");
+    sep.className = "agent-chip-sep";
+    sep.setAttribute("aria-hidden", "true");
+    inputAgentChips.appendChild(sep);
+  }
+  members.forEach(item => addChip(item, false));
 }
 
-function getChannelBots() {
-  const activeBots = [];
-  const seenBotIds = new Set();
+// Who the composer chips and the Touch Bar offer for a quick @mention in the active channel.
+// Returns { bots, members }, items { id, name, username }, deduplicated by id and by name across both lists.
+//   bots:    bot recipients of a DM / group DM; bot authors and bot mentions in the loaded messages (newest first);
+//            then, in server channels and threads only, the KNOWN_BOTS fallback. Never the fallback in DMs / group DMs.
+//   members: group DMs (type 3) only: the human recipients, without the current user. Empty everywhere else.
+function getMentionTargets() {
+  const ch = state.activeChannel || {};
+  // Pinned entries keep the type but not the recipients: take those (and a missing type) from the DM list
+  const dmEntry = ch.isThread ? null : (state.groups.find(g => g.id === ch.id) || state.dms.find(d => d.id === ch.id) || null);
+  const type = ch.type !== undefined ? ch.type : (dmEntry ? dmEntry.type : undefined);
+  const isDirect = type === 1 || type === 3;
+  const recipients = !isDirect ? [] : (Array.isArray(ch.recipients) ? ch.recipients : ((dmEntry && dmEntry.recipients) || []));
+  const myId = state.currentUser ? state.currentUser.id : null;
 
-  // In Group DM: Show group members for quick 1-tap mention
-  if (state.activeChannel && state.activeChannel.type === 3 && state.activeChannel.recipients) {
-    state.activeChannel.recipients.forEach(r => {
-      const name = r.global_name || r.username;
-      activeBots.push({
-        id: r.id,
-        name: name,
-        username: r.username
-      });
-    });
-    return activeBots;
-  }
-
-  if (state.messages && state.messages.length > 0) {
-    state.messages.forEach(m => {
-      if (m.author && m.author.bot && !seenBotIds.has(m.author.id)) {
-        seenBotIds.add(m.author.id);
-        const known = KNOWN_BOTS[m.author.id] || state.knownUsers[m.author.id];
-        activeBots.push({
-          id: m.author.id,
-          name: known ? known.name : (m.author.global_name || m.author.username),
-          username: m.author.username
-        });
-      }
-      if (m.mentions) {
-        m.mentions.forEach(men => {
-          if (men.bot && !seenBotIds.has(men.id)) {
-            seenBotIds.add(men.id);
-            const known = KNOWN_BOTS[men.id] || state.knownUsers[men.id];
-            activeBots.push({
-              id: men.id,
-              name: known ? known.name : (men.global_name || men.username),
-              username: men.username
-            });
-          }
-        });
-      }
-    });
-  }
-
-  // Dynamic fallback from known bots
-  Object.values(KNOWN_BOTS).forEach(b => {
-    if (b && !seenBotIds.has(b.id)) {
-      seenBotIds.add(b.id);
-      activeBots.push(b);
-    }
-  });
-
-  const uniqueBots = [];
+  const bots = [];
+  const members = [];
+  const seenIds = new Set();
   const seenNames = new Set();
-  activeBots.forEach(b => {
-    if (b && b.name && !seenNames.has(b.name)) {
-      seenNames.add(b.name);
-      uniqueBots.push(b);
-    }
+  const add = (list, user) => {
+    if (!user || !user.id || user.id === myId || seenIds.has(user.id)) return;
+    const known = KNOWN_BOTS[user.id];
+    const name = known ? known.name : (user.global_name || user.username);
+    if (!name || seenNames.has(name)) return;
+    seenIds.add(user.id);
+    seenNames.add(name);
+    list.push({ id: user.id, name, username: user.username || (known ? known.username : "") });
+  };
+  const isBotUser = (u) => !!(u && (u.bot === true || isBotId(u.id)));
+
+  recipients.forEach(r => { if (isBotUser(r)) add(bots, r); });
+  (state.messages || []).forEach(m => {
+    if (m.author && (m.author.bot || KNOWN_BOTS[m.author.id])) add(bots, m.author);
+    (m.mentions || []).forEach(men => { if (men.bot || KNOWN_BOTS[men.id]) add(bots, men); });
   });
-  return uniqueBots;
+  if (!isDirect) Object.values(KNOWN_BOTS).forEach(b => add(bots, b));
+
+  if (type === 3) recipients.forEach(r => { if (!isBotUser(r)) add(members, r); });
+  return { bots, members };
+}
+
+// Kept for callers that only want the agents
+function getChannelBots() {
+  return getMentionTargets().bots;
 }
 
 async function togglePinCurrentChannel() {
@@ -1781,14 +1770,15 @@ async function handleSendMessage() {
   }
 }
 
-// Dynamic Touch Bar Sync
+// Dynamic Touch Bar Sync: bots feed the "@ 智能体" popover, members (group DMs only) the "@ 成员" popover
 function notifyTouchBar() {
-  const activeBots = getChannelBots();
+  const { bots, members } = getMentionTargets();
 
   callNative("updateTouchBar", {
     channelId: state.activeChannel.id,
     channelName: state.activeChannel.name.replace(/^[#⭐👥👤🧵\s]+/u, ""),
-    bots: activeBots,
+    bots,
+    members,
     pinned: state.pinned
   });
 }

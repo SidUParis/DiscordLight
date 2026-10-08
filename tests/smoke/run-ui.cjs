@@ -89,6 +89,9 @@ const EVIL_NAME = "O'Brien \"<b>\" &amp;";
   await page.fill("#messageInput", "");
 
   // component button with a hostile custom_id
+  // (each successful component click schedules a full reload 800 ms later, see handleComponentClick)
+  const fullLoads = () => page.evaluate(() => window.__calls.filter(c => c.action === "fetchMessages" && c.limit === 40 && !c.after).length);
+  const fullLoadsBefore = await fullLoads();
   await page.click('.components-row .btn-component');
   await page.waitForTimeout(80);
   const inter = await calls("sendInteraction");
@@ -101,6 +104,10 @@ const EVIL_NAME = "O'Brien \"<b>\" &amp;";
   await page.waitForSelector('.approval-card[data-message-id="m9"][data-state="approved"]');
   const inter2 = await calls("sendInteraction");
   check("approval: Allow Once resolves the card and sends allow_once:77", inter2.length === 2 && inter2[1].customId === "allow_once:77" && inter2[1].messageId === "m9", inter2[1]);
+  // Let the two delayed reloads land now: otherwise one can re-render the list between focusing a thread card and
+  // pressing Enter below, and the key press is lost (seen as a timeout on #threadBackBtn on a loaded machine)
+  await page.waitForFunction((n) => window.__calls.filter(c => c.action === "fetchMessages" && c.limit === 40 && !c.after).length >= n, fullLoadsBefore + 2);
+  await page.waitForTimeout(100);
 
   // copy button
   await page.click(".btn-copy");
@@ -238,8 +245,9 @@ const EVIL_NAME = "O'Brien \"<b>\" &amp;";
 
   // ---------- Touch Bar contract ----------
   const tb = (await calls("updateTouchBar")).pop();
-  info.touchBar = { keys: Object.keys(tb).sort(), channelId: tb.channelId, channelName: tb.channelName, bots: tb.bots.map(b => b.name), pinned: tb.pinned.map(p => p.id + ":" + p.name) };
-  check("touch bar: payload shape unchanged {action, bots, channelId, channelName, pinned}", JSON.stringify(info.touchBar.keys) === JSON.stringify(["action", "bots", "channelId", "channelName", "pinned"]) && tb.channelId === "c1" && tb.channelName === "hermes-lab" && tb.bots.every(b => typeof b.name === "string") && tb.pinned.every(p => typeof p.name === "string" && typeof p.id === "string"), info.touchBar);
+  info.touchBar = { keys: Object.keys(tb).sort(), channelId: tb.channelId, channelName: tb.channelName, bots: tb.bots.map(b => b.name), members: (tb.members || []).map(m => m.name), pinned: tb.pinned.map(p => p.id + ":" + p.name) };
+  check("touch bar: payload shape {action, bots, channelId, channelName, members, pinned}", JSON.stringify(info.touchBar.keys) === JSON.stringify(["action", "bots", "channelId", "channelName", "members", "pinned"]) && tb.channelId === "c1" && tb.channelName === "hermes-lab" && tb.bots.every(b => typeof b.name === "string") && Array.isArray(tb.members) && tb.pinned.every(p => typeof p.name === "string" && typeof p.id === "string"), info.touchBar);
+  check("touch bar: server channel sends bots only, members is empty", tb.bots.length > 0 && tb.members.length === 0, info.touchBar);
   check("native entry points still exist with the same names", await page.evaluate(() => ["openThread", "handleComponentClick", "copyCode", "selectMention", "insertMentionFromTouchBar", "switchChannelById", "touchBarAction", "returnToParentChannel", "loadMessages"].every(n => typeof window[n] === "function")));
   check("config: no bridge call from app.js carries a token except saveConfig from the setup modal", await page.evaluate(() => window.__calls.every(c => !("token" in c))));
 

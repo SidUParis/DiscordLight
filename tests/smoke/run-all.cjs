@@ -11,6 +11,7 @@ loadPlaywright(); // fail once with the install hint instead of once per suite
 const SUITES = [
   ["ui", "run-ui.cjs"],
   ["links", "run-links.cjs"],
+  ["mentions", "run-mentions.cjs"],
   ["polling", "run-polling.cjs"],
   ["polling-edge", "run-polling-edge.cjs"],
   ["fuzz-markdown", "fuzz-markdown.cjs"]

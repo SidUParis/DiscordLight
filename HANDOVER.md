@@ -86,7 +86,7 @@ DiscordLight/
   - `sendInteraction`：向 Discord `/interactions` 端点发送原生交互式按钮组件点击。
   - `getConfig`：返回 `config.json` 的内容，**但不含 `token`**，只附带 `hasToken` 布尔值（见 4.3）。
   - `saveConfig`：接受 `token` / `pinned_channels` / `last_channel_id` / `ui` 四个键，写回 `config.json`。
-  - `updateTouchBar`：接收 `{channelId, channelName, bots, pinned}` 并重建 Touch Bar。
+  - `updateTouchBar`：接收 `{channelId, channelName, bots, members, pinned}` 并重建 Touch Bar（`bots` 是智能体，`members` 是多人群聊里的真人成员，分类规则见 3.2）。
 - **原生调用前端的入口**（原生通过 `evaluateJavaScript:` 调用，改名即失效）：
   - Touch Bar 按钮：`window.touchBarAction('logo')`、`window.insertMentionFromTouchBar(name)`、`window.switchChannelById(id)`、`window.loadMessages()`。
   - 窗口可见性：`window.setAppVisible(true | false)`，由 `windowDidChangeOcclusionState:`、`applicationDidHide:`、`applicationDidUnhide:` 调用，决定轮询间隔（见 3.9）。
@@ -99,12 +99,20 @@ DiscordLight/
 
 #### 💡 解决方案：
 1. **采用 `NSPopoverTouchBarItem`**：
-   - 在 Touch Bar 常驻区注册 `@ 智能体`（Identifier: `com.discordlight.touchbar.agents_popover`）和 `# 频道`（Identifier: `com.discordlight.touchbar.channels_popover`）。
+   - 在 Touch Bar 常驻区注册 `@ 智能体`（Identifier: `com.discordlight.touchbar.agents_popover`）、`@ 成员`（Identifier: `com.discordlight.touchbar.members_popover`）和 `# 频道`（Identifier: `com.discordlight.touchbar.channels_popover`）。
    - 即使输入法弹出候选词，Popover 气泡按钮依然常驻或只需轻触即可展开二级列表。
-2. **动态感知与双向同步**：
-   - 前端切换频道或接收到新消息时，分析当前群成员及 Bot 列表，调用 `notifyTouchBar()`（bridge action: `updateTouchBar`）传输给原生层。轮询没有新内容时不会重绘消息，也不会发 `updateTouchBar`。
+   - `@ 智能体 (n)`：只在 `bots` 非空时出现，旁边另有第一个智能体的直达按钮；展开后每个按钮插入 `@名字`。
+   - `@ 成员 (n)`：只在 `members` 非空时出现（也就是只在多人群聊里），紧跟在智能体之后；展开后每个按钮插入 `@名字`（`touchBarPopoverMemberClicked:`），点完自动收起，和智能体按钮一样。
+   - 两类按钮的二级 Identifier 分别是 `com.discordlight.touchbar.popover.bot.<i>` 和 `com.discordlight.touchbar.popover.member.<i>`，直达按钮是 `com.discordlight.touchbar.bot.<i>`；新增 Identifier 时注意不要让一个前缀成为另一个的前缀（`touchBar:makeItemForIdentifier:` 用 `hasPrefix:` 分派）。
+2. **智能体与成员的分类**（`getMentionTargets()`，`web/app.js`；输入框下方的快捷芯片用同一份结果，先智能体、后成员，两组之间有一条细分隔线）：
+   - **智能体（`bots`）**：私信 / 多人群聊里带 `bot` 标记（或登记在 `KNOWN_BOTS`）的成员；已载入消息里 `bot` 为真或登记在 `KNOWN_BOTS` 的作者与被 @ 的人（最新的在前）；只有在**服务器频道和线程**里，才把 `KNOWN_BOTS` 中还没出现的智能体作为兜底补在后面。私信和多人群聊里**永远不加**兜底。
+   - **成员（`members`）**：只在多人群聊（`type === 3`）里有：不带 `bot` 标记的成员，去掉自己（`state.currentUser.id`）。私信和服务器频道里为空。
+   - 两个列表按 id、再按显示名去重；每项是 `{id, name, username}`。关注列表里保存的群聊条目不带成员名单，按 id 去 `state.groups` / `state.dms` 里取。
+   - `getChannelBots()` 保留为只返回 `bots` 的别名。输入框里的 `@` 补全（`showMentionPopover`）不受影响，仍然列出所有已知用户和智能体。
+3. **动态感知与双向同步**：
+   - 前端切换频道或接收到新消息时，按上面的规则算出智能体与成员，调用 `notifyTouchBar()`（bridge action: `updateTouchBar`）传输给原生层。轮询没有新内容时不会重绘消息，也不会发 `updateTouchBar`。
    - 原生层动态重绘 Touch Bar 二级内容，确保“看什么频道，Touch Bar 就显示谁”。
-   - **契约**：payload 为 `{channelId, channelName, bots, pinned}`；原生只读取 `pinned[].name` / `pinned[].id` 和 `bots[].name`。改前端时不要动这几个字段。
+   - **契约**：payload 为 `{channelId, channelName, bots, members, pinned}`；原生只读取 `pinned[].name` / `pinned[].id`、`bots[].name` 和 `members[].name`。改前端时不要动这几个字段。
 
 ### 3.3 交互式组件（Component Interactions）机制 (`web/app.js`)
 - **问题**：在很多第三方轻量客户端中，当 AI Agent（如 Hermes、AutoGPT）弹出 `[Allow Once]` / `[Allow Session]` 按钮时，点击通常只往输入框发一句话，导致 Bot 报 Invalid Interaction。
@@ -344,8 +352,8 @@ make test
   # 之后每次
   make test        # 等同于 cd tests && npm test
   ```
-  `npm test` 运行 `tests/smoke/run-all.cjs`，依次跑五个套件，最后打印每个套件一行汇总，任何一个失败退出码就非 0。单个套件可以直接 `node tests/smoke/run-ui.cjs [web 目录]`。
-- **套件**：`ui`（侧栏、搜索、注入防护、审批卡片、Touch Bar payload、空状态与首次引导）、`links`（Command 快捷键、链接按钮）、`polling` 与 `polling-edge`（3.9 的轻量轮询）、`fuzz-markdown`（30000 条随机恶意输入喂给 `parseMarkdown`）。
+  `npm test` 运行 `tests/smoke/run-all.cjs`，依次跑六个套件，最后打印每个套件一行汇总，任何一个失败退出码就非 0。单个套件可以直接 `node tests/smoke/run-ui.cjs [web 目录]`。
+- **套件**：`ui`（侧栏、搜索、注入防护、审批卡片、Touch Bar payload、空状态与首次引导）、`links`（Command 快捷键、链接按钮）、`mentions`（智能体与群聊成员的划分：Touch Bar 的 `bots` / `members` 与输入框芯片，见 3.2）、`polling` 与 `polling-edge`（3.9 的轻量轮询）、`fuzz-markdown`（30000 条随机恶意输入喂给 `parseMarkdown`）。
 - **截图**写到 `tests/smoke/.shots/<套件>/`（已 gitignore）。失败时打印 INFO（实测数值），`DL_TEST_VERBOSE=1` 时通过也打印。
 - 轮询套件把间隔缩短到 150 ms 测计时，机器负载很高时可能误报，重跑一次再判断。加用例的方法见 `tests/README.md`。
 
@@ -435,9 +443,10 @@ python3 assets/make_icon.py --preview /tmp/dl  # 另外把预览拼图和 18px �
 - **安全加固**。消息内容先转义再做 Markdown；移除所有拼接数据的内联 `onclick`，改为 `data-act` 委托监听；`getConfig` 不再返回 token；新增导航策略，外部链接交给系统浏览器；Touch Bar 调用前端时对参数做 JSON 编码；新增安全的 URL 自动链接；Discord 链接按钮（style 5）渲染为只接受 http(s) 的普通链接，不再被当成交互按钮；调试用的 `com.discordlight.test` eval 入口改为仅在设置 `DISCORDLIGHT_DEBUG` 时注册；`respondToJS` 校验回调名并转义 U+2028 / U+2029（见 4.3）。
 - **轻量轮询**。`fetchMessages` 新增可选的 `after`（只接受数字）；轮询改为 `after` 增量请求，空回答不做 DOM 工作；每第 12 次轮询做一次 `limit: 15` 的 resync，只在 id / `edited_timestamp` / 按钮 `disabled` / 线程信息变化时重绘；前台 2.5 s、后台 15 s（原生遮挡 / 隐藏通知 + `visibilitychange` 后备），回到前台立即 resync；引导弹窗打开时不轮询；同一时间只有一个轮询，切换频道后丢弃旧回答；可能有缺口时整页重载；内存最多 100 条；状态栏显示 `已连接` / `已连接 · 后台低频`（见 3.9）。
 - **原创图标**。石墨色圆角方块 + 琥珀色闪电，取代基于 Discord 标志的旧图标（商标风险），`assets/make_icon.py` 可重新生成；旧图标保留在 git 历史里（见 5.5）。
-- **冒烟测试**。新增仅供开发的 `tests/`（Playwright + 假 bridge，五个套件），`make test` 一键运行（见 5.4）。
+- **冒烟测试**。新增仅供开发的 `tests/`（Playwright + 假 bridge，六个套件），`make test` 一键运行（见 5.4）。
 - **构建与采样脚本**。新增 `scripts/build-and-run.command`（双击构建、安装并重启应用）和 `scripts/run-debug.command`（前台运行 90 秒采样 RSS/CPU、抓崩溃报告），日志写入 `scripts/*.log`（见 5.2）。
 - **Bug 修复**。消息时间由 UTC 改为本地时间；清洗旧 emoji 前缀的正则补上 `u` 标志（之前会把名字里的 emoji 截成半个字符）；首次保存 token 后事件监听被重复绑定的问题；评审中把 autorelease 的 `NSCharacterSet` 缓存进 `static` 导致的 `EXC_BAD_ACCESS` 崩溃已撤回；随后把 `main.m` 整体切到 ARC，修掉了 bridge 回调与 Touch Bar 的内存泄漏（见 3.7）。
+- 修复：群聊成员被当作智能体显示在 Touch Bar 与输入框芯片里；智能体与成员分开，兜底的 `KNOWN_BOTS` 只在服务器频道启用。Touch Bar 新增 `@ 成员` 抽屉，`updateTouchBar` payload 新增 `members`（见 3.2）。
 
 ### v1.0.0 (2026-10-07)
 - 首个交接版本。

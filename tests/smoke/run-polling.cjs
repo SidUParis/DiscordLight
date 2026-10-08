@@ -307,7 +307,7 @@ const gapsOf = (ts) => ts.slice(1).map((t, i) => Math.round(t - ts[i]));
   await waitFm(mark, 2, "c.after !== undefined");
   check("(6) after the reload that follows a send, polls carry after = the sent message id", (await fmSince(mark)).filter(c => c.after !== undefined).every(c => c.after === sentId), sentId);
   const tbAll = await page.evaluate(() => window.__calls.filter(c => c.action === "updateTouchBar"));
-  check("(6) updateTouchBar payload unchanged {action, bots, channelId, channelName, pinned}", tbAll.length > 0 && tbAll.every(c => keysOf(c) === "action,bots,channelId,channelName,pinned"), [...new Set(tbAll.map(keysOf))]);
+  check("(6) updateTouchBar payload {action, bots, channelId, channelName, members, pinned}", tbAll.length > 0 && tbAll.every(c => keysOf(c) === "action,bots,channelId,channelName,members,pinned"), [...new Set(tbAll.map(keysOf))]);
   const fmKeys = [...new Set((await fm()).map(keysOf))].sort();
   check("(6) fetchMessages payloads: only the optional `after` key was added", JSON.stringify(fmKeys) === JSON.stringify(["action,after,channelId,limit", "action,channelId,limit"]), fmKeys);
 
